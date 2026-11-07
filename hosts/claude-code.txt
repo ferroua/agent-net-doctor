@@ -1,0 +1,18 @@
+# Хосты Claude Code, к которым CLI ходит при работе.
+# Агент:   Claude Code 2.1.319, linux x86_64 (нативный бинарь)
+# sha256:  dabafec82ca1319f… (первые 16 знаков)
+# Снято:   2026-11-07
+# Команда: strings -n 8 <бинарь> | grep -oE 'https?://[A-Za-z0-9.-]+'
+# Формат:  хост<TAB>важность<TAB>зачем (путь из бинаря)
+#   важность: нужен — без него агент не работает; доп — отказ не ломает основную работу
+#
+# Не взяты, хотя есть в бинаре:
+#   claude.ai, claude.com — страницы входа, их открывает браузер, а не CLI
+#   cdn.growthbook.io — адрес по умолчанию встроенной библиотеки флагов
+#   bridge.claudeusercontent.com — назначение по бинарю не установлено
+#   документация, staging, example.com, хосты сторонних библиотек
+api.anthropic.com	нужен	API модели (/v1/messages), OAuth (/api/oauth/…)
+platform.claude.com	нужен	обновление токена входа (/v1/oauth/token)
+downloads.claude.ai	доп	обновления CLI (/claude-code-releases), каталог моделей
+mcp-proxy.anthropic.com	доп	коннекторы MCP из аккаунта claude.ai (/v1/mcp/…)
+http-intake.logs.us5.datadoghq.com	доп	телеметрия ошибок (/api/v2/logs)

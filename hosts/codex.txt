@@ -1,0 +1,16 @@
+# Хосты Codex CLI, к которым CLI ходит при работе.
+# Агент:   codex-cli 0.155.1, linux x86_64 (бинарь из @openai/codex-linux-x64, musl)
+# sha256:  0753dfe1d8b87a52… (первые 16 знаков)
+# Снято:   2026-11-07
+# Команда: strings -n 8 <бинарь> | grep -oE 'https?://[A-Za-z0-9.-]+'
+# Формат:  хост<TAB>важность<TAB>зачем (путь из бинаря)
+#   важность: нужен — без него агент не работает; доп — отказ не ломает основную работу
+#   api.openai.com нужен при входе по ключу API, chatgpt.com — при входе через ChatGPT
+#
+# Не взяты, хотя есть в бинаре:
+#   persistent.oaistatic.com — картинки для интерфейса
+#   документация, staging, github.com и хосты сторонних библиотек
+api.openai.com	нужен	API модели по ключу (/v1/responses)
+chatgpt.com	нужен	API при входе через ChatGPT (/backend-api/codex)
+auth.openai.com	нужен	обновление токена входа (/oauth/token)
+ab.chatgpt.com	доп	телеметрия, метрики (/otlp/v1/metrics)
