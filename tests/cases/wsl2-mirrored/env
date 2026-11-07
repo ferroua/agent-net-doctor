@@ -1,3 +1,4 @@
 WSL_DISTRO_NAME=Ubuntu
 http_proxy=http://127.0.0.1:10809
 no_proxy=localhost,127.0.0.1,<local>,intra.corp.example
+STUB_CONNECT_10809=0.002*10

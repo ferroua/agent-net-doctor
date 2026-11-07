@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Заглушка timeout: подключения скрипта к /dev/tcp не уходят в сеть, а получают
+# заданный результат. Остальные вызовы timeout идут к настоящей команде.
+#
+# Результаты для порта — в переменной STUB_CONNECT_<порт>, через пробел, по попыткам:
+#   1.005   подключение удалось за 1,005 с
+#   -       нет ответа (истёк timeout)
+#   r       в подключении отказано
+#   x*N     повторить x N раз
+# Порта нет в переменных — нет ответа, как в сети, которой нет.
+case "$*" in
+  *-c*/dev/tcp/*) ;;
+  *) for t in /usr/bin/timeout /bin/timeout; do [ -x "$t" ] && exec "$t" "$@"; done
+     echo "timeout: нет настоящей команды" >&2; exit 127 ;;
+esac
+
+port=${!#}
+var="STUB_CONNECT_$port"
+plan=()
+for tok in ${!var:-}; do
+  if [[ $tok == *\** ]]; then
+    for ((k = 0; k < ${tok#*\*}; k++)); do plan+=("${tok%\**}"); done
+  else
+    plan+=("$tok")
+  fi
+done
+
+state="${HOME:-/tmp}/.stub-connect-$port"
+n=$(cat "$state" 2>/dev/null || echo 0)
+echo $((n + 1)) > "$state"
+
+r=${plan[$n]:--}
+case $r in
+  -) exit 124 ;;
+  r) exit 1 ;;
+  *) printf '0 %s' "$r" ;;
+esac

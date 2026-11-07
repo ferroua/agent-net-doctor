@@ -34,7 +34,12 @@ WARNS=0
   AGENTS=()            # найденные агенты: claude-code, codex
   CLAUDE_VER=""
   CODEX_VER=""
+  BRIDGE=""            # ok | broken | down | slow | noisy | skipped — итог замера до прокси
+  BRIDGE_WSL=0         # 1 — прокси за мостом WSL↔Windows
 }
+
+# Для тестов: ND_PYTHON — имя или путь python3 (по умолчанию python3).
+ND_PYTHON="${ND_PYTHON:-python3}"
 
 # ---------- вывод ----------
 
@@ -497,6 +502,237 @@ check_proxy_vars() {
   return 0
 }
 
+# ---------- мост до прокси ----------
+# Серия подключений к прокси-порту против серии к контрольному порту внутри WSL.
+# Подпись поломки моста в mirrored: к прокси 4/10, каждое удачное ~1,005 с
+# (SYN теряется, ретрансмит по таймеру), а контрольный порт — 10/10 за миллисекунды.
+
+PROBE_TRIES=10
+PROBE_TIMEOUT=2       # секунд на подключение: ловит первый ретрансмит SYN (1 с)
+SLOW_US=500000        # удачное подключение дольше 0,5 с — признак потерь SYN
+FAST_US=100000        # контрольный порт «быстрый»: 10/10 и медиана меньше 0,1 с
+
+# Хост и порт из адреса прокси → PX_HOST, PX_PORT. Порт по умолчанию — по схеме.
+PX_HOST="" PX_PORT=""
+parse_proxy_url() {
+  local url=$1 scheme="" rest hostport
+  if [[ $url == *://* ]]; then scheme=${url%%://*}; rest=${url#*://}; else rest=$url; fi
+  rest=${rest##*@}
+  hostport=${rest%%/*}
+  PX_HOST="" PX_PORT=""
+  if [[ $hostport == \[*\]* ]]; then
+    PX_HOST=${hostport%%]*}; PX_HOST=${PX_HOST#[}
+    PX_PORT=${hostport#*]}; PX_PORT=${PX_PORT#:}
+  elif [[ $hostport == *:* && $hostport != *:*:* ]]; then
+    PX_HOST=${hostport%:*}; PX_PORT=${hostport##*:}
+  else
+    PX_HOST=$hostport
+  fi
+  if [[ -z $PX_PORT ]]; then
+    case ${scheme,,} in
+      https)   PX_PORT=443 ;;
+      socks*)  PX_PORT=1080 ;;
+      *)       PX_PORT=80 ;;
+    esac
+  fi
+  [[ -n $PX_HOST && $PX_PORT =~ ^[0-9]+$ ]]
+}
+
+is_loopback() { [[ $1 == localhost || $1 == ::1 || $1 =~ ^127(\.[0-9]{1,3}){3}$ ]]; }
+
+# Одно подключение. Печатает «ok <мкс>», «refused» или «timeout».
+# Время меряет сам дочерний bash вокруг connect, без затрат на его запуск.
+probe_tcp() {
+  local out rc s e
+  # shellcheck disable=SC2016  # переменные раскрывает дочерний bash
+  out=$(timeout "$PROBE_TIMEOUT" "$BASH" -c '
+    now() { if [[ -n ${EPOCHREALTIME:-} ]]; then printf %s "$EPOCHREALTIME"; else date +%s.%N; fi; }
+    s=$(now); exec 3<>"/dev/tcp/$1/$2" || exit 1; printf "%s %s" "$s" "$(now)"' _ "$1" "$2" 2>/dev/null)
+  rc=$?
+  if [[ $rc -eq 124 ]]; then echo timeout; return; fi
+  if [[ $rc -ne 0 || $out != *" "* ]]; then echo refused; return; fi
+  s=$(to_us "${out%% *}") e=$(to_us "${out##* }")
+  echo "ok $((e > s ? e - s : 0))"
+}
+
+# «1.005123» или «1,005123» → микросекунды.
+to_us() {
+  local v=${1/,/.} i f
+  i=${v%%.*}; f=""
+  [[ $v == *.* ]] && f=${v#*.}
+  f=${f}000000; f=${f:0:6}
+  echo $((10#${i:-0} * 1000000 + 10#$f))
+}
+
+# Микросекунды → «1,005» (секунды, три знака, запятая); меньше 1 мс — «<0,001».
+fmt_s() {
+  if (($1 < 1000)); then printf '<0,001'; return; fi
+  printf '%d,%03d' $(($1 / 1000000)) $(($1 % 1000000 / 1000))
+}
+
+# Серия из PROBE_TRIES подключений → S_OK, S_SLOW, S_MAX, S_MED (мкс, по удачным),
+# S_LINE — результат каждой попытки, S_REFUSED — сколько отказов.
+S_OK=0 S_SLOW=0 S_MAX=0 S_MED=0 S_REFUSED=0 S_LINE=""
+probe_series() {
+  local host=$1 port=$2 i r us times=()
+  S_OK=0 S_SLOW=0 S_MAX=0 S_MED=0 S_REFUSED=0 S_LINE=""
+  for ((i = 0; i < PROBE_TRIES; i++)); do
+    r=$(probe_tcp "$host" "$port")
+    case $r in
+      ok\ *)
+        us=${r#ok }
+        times+=("$us")
+        S_OK=$((S_OK + 1))
+        ((us >= SLOW_US)) && S_SLOW=$((S_SLOW + 1))
+        ((us > S_MAX)) && S_MAX=$us
+        S_LINE+=" $(fmt_s "$us")" ;;
+      refused) S_REFUSED=$((S_REFUSED + 1)); S_LINE+=" отказ" ;;
+      *)       S_LINE+=" —" ;;
+    esac
+  done
+  S_LINE=${S_LINE# }
+  if [[ ${#times[@]} -gt 0 ]]; then
+    S_MED=$(printf '%s\n' "${times[@]}" | sort -n | sed -n "$(((${#times[@]} + 1) / 2))p")
+  fi
+}
+
+# Контрольный сервер на 127.0.0.1 внутри WSL: python3 печатает порт и принимает
+# подключения, пока его не остановят (сам выходит через 60 с).
+CTL_PID="" CTL_PORT=""
+start_control() {
+  local f i
+  command -v "$ND_PYTHON" >/dev/null 2>&1 || return 1
+  f=$(mktemp) || return 2
+  "$ND_PYTHON" -c '
+import socket, sys
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+s.listen(64)
+print(s.getsockname()[1], flush=True)
+s.settimeout(60)
+try:
+    while True:
+        c, _ = s.accept()
+        c.close()
+except Exception:
+    pass
+' >"$f" 2>/dev/null &
+  CTL_PID=$!
+  for ((i = 0; i < 40; i++)); do
+    CTL_PORT=$(head -n1 "$f" 2>/dev/null)
+    [[ $CTL_PORT =~ ^[0-9]+$ ]] && break
+    CTL_PORT=""
+    kill -0 "$CTL_PID" 2>/dev/null || break
+    sleep 0.05
+  done
+  rm -f "$f"
+  [[ -n $CTL_PORT ]] && return 0
+  stop_control
+  return 2
+}
+
+stop_control() {
+  [[ -n $CTL_PID ]] || return 0
+  kill "$CTL_PID" 2>/dev/null
+  wait "$CTL_PID" 2>/dev/null
+  CTL_PID=""
+}
+
+# Шлюз по умолчанию — в NAT это Windows.
+default_gw() {
+  command -v ip >/dev/null 2>&1 || return 1
+  ip route show default 2>/dev/null | sed -n 's/.*\bvia \([^ ]*\).*/\1/p' | head -n1
+}
+
+# shellcheck disable=SC2034  # BRIDGE, BRIDGE_WSL читает вердикт (задача 6)
+check_bridge() {
+  local name val="" where gw rc px_ok px_slow px_max px_med px_line px_refused
+  for name in https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY; do
+    val=${!name:-}
+    [[ -n $val ]] && break
+  done
+  [[ -n $val ]] || return 0
+
+  if ! parse_proxy_url "$val"; then
+    section "Подключение к прокси"
+    step_skip "не разобрал адрес прокси в $name: замер пропущен"
+    BRIDGE=skipped
+    return 0
+  fi
+
+  # За мостом ли прокси: в mirrored петля — это Windows, в NAT Windows — шлюз.
+  if [[ $ENV_KIND == wsl2 ]]; then
+    if [[ $WSL_MODE == mirrored ]] && is_loopback "$PX_HOST"; then
+      BRIDGE_WSL=1
+    elif [[ $WSL_MODE == nat ]] && gw=$(default_gw) && [[ -n $gw && $gw == "$PX_HOST" ]]; then
+      BRIDGE_WSL=1
+    fi
+  fi
+  if [[ $BRIDGE_WSL == 1 ]]; then section "Мост WSL↔Windows до прокси"; where="мост WSL↔Windows до прокси"
+  else section "Подключение к прокси"; where="связь до прокси"; fi
+
+  local shown
+  shown=$(mask_proxy_url "$PX_HOST")
+  [[ $PX_HOST == *:* ]] && shown="[${shown#[}" && shown="${shown%]}]"
+  say "  $PROBE_TRIES подключений к прокси-порту $shown:$PX_PORT и к контрольному порту на 127.0.0.1"
+
+  probe_series "$PX_HOST" "$PX_PORT"
+  px_ok=$S_OK px_slow=$S_SLOW px_max=$S_MAX px_med=$S_MED px_line=$S_LINE px_refused=$S_REFUSED
+
+  # Контрольная серия.
+  local ctl=0 ctl_ok=0 ctl_med=0 ctl_line=""
+  trap stop_control EXIT
+  rc=0; start_control || rc=$?
+  if [[ $rc -eq 0 ]]; then
+    probe_series 127.0.0.1 "$CTL_PORT"
+    stop_control
+    ctl=1 ctl_ok=$S_OK ctl_med=$S_MED ctl_line=$S_LINE
+  fi
+
+  say "    прокси:      $px_ok/$PROBE_TRIES  $px_line"
+  if [[ $ctl == 1 ]]; then
+    say "    контрольный: $ctl_ok/$PROBE_TRIES  $ctl_line"
+  elif [[ $rc -eq 1 ]]; then
+    step_skip "контрольный замер пропущен: python3 не найден — сравнить не с чем"
+  else
+    step_skip "контрольный замер пропущен: python3 не запустил контрольный сервер — сравнить не с чем"
+  fi
+
+  local ctl_good=0
+  [[ $ctl == 1 && $ctl_ok -eq $PROBE_TRIES && $ctl_med -lt $FAST_US ]] && ctl_good=1
+  local ctl_txt=""
+  [[ $ctl_good == 1 ]] && ctl_txt="; контрольный порт $ctl_ok/$PROBE_TRIES за $(fmt_s "$ctl_med") с"
+
+  if [[ $px_ok -eq 0 ]]; then
+    BRIDGE=down
+    if [[ $px_refused -eq $PROBE_TRIES ]]; then
+      step_fail "прокси-порт не отвечает: 0/$PROBE_TRIES, в подключении отказано"
+      if [[ $ENV_KIND == wsl2 && $WSL_MODE == nat ]] && is_loopback "$PX_HOST"; then
+        say "    В режиме NAT 127.0.0.1 — это сам WSL, а не Windows: прокси Windows так не достать."
+      fi
+    else
+      step_fail "прокси-порт не отвечает: 0/$PROBE_TRIES за $PROBE_TIMEOUT с"
+    fi
+  elif [[ $ctl == 1 && $ctl_good == 0 ]]; then
+    BRIDGE=noisy
+    step_warn "контрольный порт внутри WSL тоже с потерями или медленный ($ctl_ok/$PROBE_TRIES): замер не показателен, машина перегружена?"
+  elif [[ $px_ok -lt $PROBE_TRIES || $px_slow -gt 0 ]]; then
+    BRIDGE=broken
+    local detail="$px_ok/$PROBE_TRIES"
+    [[ $px_slow -gt 0 ]] && detail+=", удачные по ~$(fmt_s "$px_med") с"
+    step_fail "рвётся $where: $detail$ctl_txt"
+    [[ $px_slow -gt 0 ]] && say "    Удачные подключения по ~1 с — потеря SYN и повтор по таймеру."
+  else
+    BRIDGE=ok
+    if [[ $ctl == 1 ]]; then
+      step_ok "прокси-порт $px_ok/$PROBE_TRIES за $(fmt_s "$px_max") с$ctl_txt"
+    else
+      step_ok "прокси-порт $px_ok/$PROBE_TRIES за $(fmt_s "$px_max") с"
+    fi
+  fi
+  return 0
+}
+
 # ---------- вердикт ----------
 
 verdict() {
@@ -520,6 +756,7 @@ main() {
   [[ $ENV_KIND == wsl2 ]] && check_wsl
   check_agents
   check_proxy_vars
+  check_bridge
   verdict
 }
 

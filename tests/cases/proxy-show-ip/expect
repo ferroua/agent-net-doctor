@@ -1,3 +1,4 @@
 https_proxy=http://alice:***@203.0.113.7:3128
 HTTP_PROXY=http://bob@proxy.corp.example:8080/
 Внимание: --show-ip
+к прокси-порту 203.0.113.7:3128

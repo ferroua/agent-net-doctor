@@ -1,0 +1,4 @@
+WSL_DISTRO_NAME=Ubuntu
+http_proxy=http://127.0.0.1:10809
+ND_PYTHON=python3-net-doctor-net
+STUB_CONNECT_10809=1.005 - - 1.004 - 1.006 - - 1.005 -
