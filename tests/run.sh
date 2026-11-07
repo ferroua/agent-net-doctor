@@ -96,6 +96,11 @@ unit() {
   check "прокси: без схемы"        0 mask_proxy_url "10.1.2.3:8080" "x.x.x.x:8080"
   check "прокси: [ipv6]:порт"      0 mask_proxy_url "http://[2001:db8::5]:3128" "http://[x:x::x]:3128"
   check "прокси: [::1] виден"      0 mask_proxy_url "http://[::1]:3128" "http://[::1]:3128"
+  check "прокси: «/» в пароле"      0 mask_proxy_url "http://u:pa/ss@proxy.corp.example:80" "http://***@***:80"
+  check "прокси: «@» в пароле"      0 mask_proxy_url "http://u:p@ss@10.1.2.3:80" "http://***@x.x.x.x:80"
+  check "прокси: 127.имя скрыто"    0 mask_proxy_url "http://127.corp.example:3128" "http://***:3128"
+  check "прокси: localhost.имя скрыто" 0 mask_proxy_url "http://localhost.corp.example:3128" "http://***:3128"
+  check "текст: «/» в пароле"       0 mask_text "http://u:pa/ss@1.2.3.4:80" "http://***@x.x.x.x:80"
   check "прокси: show-ip"          1 mask_proxy_url "http://a:b@proxy.corp.example:3128" "http://a:***@proxy.corp.example:3128"
 }
 

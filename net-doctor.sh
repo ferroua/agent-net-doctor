@@ -71,9 +71,10 @@ mask_ipv6() {
 }
 
 # Логин и пароль в URL. Пароль скрыт всегда, логин — без --show-ip.
+# Захват жадный, до последней «@» перед пробелом: в пароле бывают «/» и «@».
 mask_userinfo() {
   local s=$1 out="" pre ui
-  local re='://([^/@[:space:]]+)@'
+  local re='://([^[:space:]]+)@'
   while [[ $s =~ $re ]]; do
     ui=${BASH_REMATCH[1]}
     pre=${s%%"${BASH_REMATCH[0]}"*}
@@ -112,12 +113,14 @@ mask_proxy_url() {
   else
     rest=$url
   fi
+  # Логин и пароль — всё до последней «@»: в пароле бывают «/» и «@».
+  # «@» в пути тоже уйдёт в скрытое — лучше скрыть лишнее, чем показать пароль.
+  if [[ $rest == *@* ]]; then
+    ui=${rest%@*}
+    rest=${rest##*@}
+  fi
   hostport=${rest%%/*}
   [[ $rest == */* ]] && tail=/${rest#*/}
-  if [[ $hostport == *@* ]]; then
-    ui=${hostport%@*}
-    hostport=${hostport##*@}
-  fi
   if [[ $hostport == \[*\]* ]]; then            # [IPv6]:порт
     host=${hostport%%]*}]
     port=${hostport#"$host"}
@@ -139,11 +142,16 @@ mask_proxy_url() {
   fi
 
   if [[ $SHOW_IP != 1 ]]; then
-    case $host in
-      localhost|127.*|'[::1]'|::1) ;;
-      \[*|*:*) host='[x:x::x]' ;;
-      ?*) if [[ $host =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then host='x.x.x.x'; else host='***'; fi ;;
-    esac
+    if [[ $host == localhost || $host == ::1 || $host == '[::1]' ||
+          $host =~ ^127(\.[0-9]{1,3}){3}$ ]]; then
+      :                                        # петля видна, имя «127.x.example» — нет
+    elif [[ $host == \[* || $host == *:* ]]; then
+      host='[x:x::x]'
+    elif [[ $host =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      host='x.x.x.x'
+    elif [[ -n $host ]]; then
+      host='***'
+    fi
   fi
   printf '%s' "$scheme$ui$host$port$tail"
 }
