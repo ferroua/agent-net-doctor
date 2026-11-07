@@ -46,7 +46,10 @@ run_case() {
   while IFS= read -r l; do envs+=("$l"); done < <(lines "$dir/env")
   while IFS= read -r l; do args+=("$l"); done < <(lines "$dir/args")
 
-  local root=""
+  # Корень всегда свой: без root/ — пустой, чтобы настоящие /proc и /mnt/c
+  # машины, на которой идут тесты, не попали в сценарий.
+  local root="$tmp/root"
+  mkdir -p "$root"
   [[ -d $dir/root ]] && root="$dir/root"
 
   out=$(env -i HOME="$tmp/home" PATH="$tmp/bin:/usr/bin:/bin" LANG=C.UTF-8 \

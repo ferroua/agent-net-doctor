@@ -1,0 +1,2 @@
+#!/bin/sh
+[ "$1" = --networking-mode ] && { echo nat; exit 0; }; exit 1

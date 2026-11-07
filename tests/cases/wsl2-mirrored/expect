@@ -1,0 +1,5 @@
+WSL2, дистрибутив Ubuntu
+.wslconfig: networkingMode=mirrored
+режим сети: mirrored (wslinfo)
+http_proxy=http://127.0.0.1:10809
+прокси импортирован из Windows

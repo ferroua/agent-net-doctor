@@ -1,0 +1,3 @@
+# мой конфиг
+[WSL2]
+  networkingMode = mirrored  ; зеркало

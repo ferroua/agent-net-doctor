@@ -1,0 +1,5 @@
+режим сети: mirrored (wslinfo)
+networkingMode=nat, а WSL работает в mirrored
+wsl --shutdown
+autoProxy=false, а переменные из Windows на месте
+Предупреждений: 2
