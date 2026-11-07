@@ -1,0 +1,3 @@
+WSL_DISTRO_NAME=Ubuntu
+# autoProxy выключен, а режим остался mirrored: VPN в режиме TUN забирает прямой трафик.
+STUB_CURL_DIRECT=28

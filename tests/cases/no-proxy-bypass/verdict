@@ -1,0 +1,1 @@
+no_proxy: api.openai.com, auth.openai.com идут мимо прокси, а напрямую недоступны

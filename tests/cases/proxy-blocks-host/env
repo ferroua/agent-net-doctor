@@ -1,0 +1,3 @@
+https_proxy=http://127.0.0.1:3128
+STUB_CONNECT_3128=0.002*10
+STUB_CURL_PROXY_api_openai_com=56

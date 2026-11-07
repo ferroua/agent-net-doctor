@@ -20,9 +20,7 @@ SHOW_IP=0
 FAILS=0
 WARNS=0
 
-# Что узнали о среде — для следующих проверок и вердикта.
-# Часть переменных читают проверки задач 4–6, которых ещё нет.
-# shellcheck disable=SC2034
+# Что узнали о среде и замерах — для следующих проверок и вердикта.
 {
   ENV_KIND=""          # wsl2 | wsl1 | container | linux
   WSL_MODE=""          # nat | mirrored | virtioproxy | none — только в WSL
@@ -32,16 +30,19 @@ WARNS=0
   WSLCONF_DNSTUN=""    # dnsTunneling из .wslconfig, если задан
   PROXY_FROM_WINDOWS=0 # 1 — в no_proxy маркер <local>: прокси импортирован из Windows
   AGENTS=()            # найденные агенты: claude-code, codex
-  CLAUDE_VER=""
-  CODEX_VER=""
+  # shellcheck disable=SC2034  # версии агентов пишет printf -v, для отчёта
+  CLAUDE_VER="" CODEX_VER=""
   BRIDGE=""            # ok | broken | down | slow | noisy | skipped — итог замера до прокси
   BRIDGE_WSL=0         # 1 — прокси за мостом WSL↔Windows
+  BRIDGE_OK=0          # удачных подключений к прокси-порту из PROBE_TRIES
+  BRIDGE_REFUSED=0     # из них отказов
   DNS_STATE=""         # ok | fail | proxy-only — имена хостов агентов
-  V6_NOROUTE=0         # 1 — у хоста есть адрес IPv6, а маршрута IPv6 нет
+  DNS_HANG=0           # 1 — DNS не ответил за DNS_TIMEOUT
   EP_STATE=""          # ok | fail | extra — нужные хосты доступны / нет / не все доп
   EP_DIRECT=""         # ok | down | partial | skipped — прямой доступ (без прокси)
   EP_PROXY=""          # ok | down | partial | skipped — через прокси
   TLS_STATE=""         # ok | intercept | untrusted | skipped
+  TLS_ORG=""           # издатель сертификата при перехвате
 }
 
 # Для тестов: ND_PYTHON — имя или путь python3 (по умолчанию python3).
@@ -498,7 +499,6 @@ check_proxy_vars() {
   # а в нём маркер <local> («не через прокси для локальных адресов»).
   # Само значение не печатается: там бывают имена внутренних хостов.
   if [[ ${no_proxy:-}${NO_PROXY:-} == *"<local>"* ]]; then
-    # shellcheck disable=SC2034  # читает вердикт (задача 6)
     PROXY_FROM_WINDOWS=1
     step_ok "прокси импортирован из Windows: в no_proxy есть «<local>» (autoProxy WSL)"
     if [[ $ENV_KIND == wsl2 && $WSLCONF_AUTOPROXY == false ]]; then
@@ -663,7 +663,6 @@ default_gw() {
   ip route show default 2>/dev/null | sed -n 's/.*\bvia \([^ ]*\).*/\1/p' | head -n1
 }
 
-# shellcheck disable=SC2034  # BRIDGE, BRIDGE_WSL читает вердикт (задача 6)
 check_bridge() {
   local name val where gw rc px_ok px_slow px_max px_med px_line px_refused
   pick_proxy || return 0
@@ -694,6 +693,7 @@ check_bridge() {
 
   probe_series "$PX_HOST" "$PX_PORT"
   px_ok=$S_OK px_slow=$S_SLOW px_max=$S_MAX px_med=$S_MED px_line=$S_LINE px_refused=$S_REFUSED
+  BRIDGE_OK=$px_ok BRIDGE_REFUSED=$px_refused
 
   # Контрольная серия.
   local ctl=0 ctl_ok=0 ctl_med=0 ctl_line=""
@@ -848,11 +848,26 @@ probe_https() { # хост  direct|proxy  префикс
   rm -f "$err"
   printf '%s_rc\t%s\n%s_code\t%s\n%s_time\t%s\n%s_iss\t%s\n' \
     "$p" "$rc" "$p" "${out%% *}" "$p" "${out##* }" "$p" "${iss//$'\r'/}"
+  return "$rc"
+}
+
+# Повторять ли запрос: сбой бывает разовым («соединение оборвано», «нет ответа»).
+# Не повторяются успех, ошибки имени (5, 6) и непроверенный сертификат (60).
+worth_retry() { case $1 in 0|5|6|60) return 1 ;; esac; return 0; }
+
+# Запрос по пути агента; не удался — ещё одна попытка, код первой — в <префикс>_first.
+# Строки второй попытки идут после первой и при чтении заменяют их.
+probe_path() { # хост  direct|proxy  префикс  путь-агента(d|p)
+  local rc=0
+  probe_https "$1" "$2" "$3" || rc=$?
+  [[ $3 == "$4" ]] && worth_retry "$rc" || return 0
+  printf '%s_first\t%s\n' "$3" "$rc"
+  probe_https "$1" "$2" "$3" || true
 }
 
 # Всё о хосте: DNS, IPv6, прямой доступ, через прокси. Пишет в файл $2.
 probe_host() { # хост  файл
-  local host=$1 f=$2 a4="" a6="" rc4=0 rc6=0 v6route=""
+  local host=$1 f=$2 a4="" a6="" rc4=0 rc6=0 v6route="" pth
   {
     a4=$(timeout "$DNS_TIMEOUT" getent ahostsv4 "$host" 2>/dev/null) || rc4=$?
     a6=$(timeout "$DNS_TIMEOUT" getent ahostsv6 "$host" 2>/dev/null) || rc6=$?
@@ -862,8 +877,9 @@ probe_host() { # хост  файл
       if ip -6 route get "$a6" >/dev/null 2>&1; then v6route=1; else v6route=0; fi
     fi
     printf 'a4\t%s\nrc4\t%s\na6\t%s\nrc6\t%s\nv6route\t%s\n' "$a4" "$rc4" "$a6" "$rc6" "$v6route"
-    probe_https "$host" direct d
-    [[ -n $PROXY_URL ]] && probe_https "$host" proxy p
+    pth=$(agent_path "$host")
+    probe_path "$host" direct d "$pth"
+    [[ -n $PROXY_URL ]] && probe_path "$host" proxy p "$pth"
   } >"$f"
 }
 
@@ -885,9 +901,10 @@ curl_why() {
 
 # Результат пути (d или p) хоста $1 одной фразой.
 path_txt() {
-  local rc=${R[$1.$2_rc]:-} code=${R[$1.$2_code]:-} t=${R[$1.$2_time]:-0}
+  local rc=${R[$1.$2_rc]:-} code=${R[$1.$2_code]:-} t=${R[$1.$2_time]:-0} first=${R[$1.$2_first]:-}
   if [[ $rc == 0 ]]; then
     printf 'ответил (HTTP %s) за %s с' "$code" "$(fmt_s "$(to_us "$t")")"
+    [[ -n $first ]] && printf ' со второй попытки (первая: %s)' "$(curl_why "$first")"
   elif [[ $rc == 28 ]]; then
     printf 'нет ответа за %s с' "$(fmt_s "$(to_us "$t")")"
   else
@@ -957,7 +974,6 @@ agent_path() {
   if [[ -n $PROXY_URL ]] && ! in_no_proxy "$1"; then printf p; else printf d; fi
 }
 
-# shellcheck disable=SC2034  # итог читает вердикт (задача 6)
 check_dns() {
   section "DNS и IPv6"
   local line host total=0 bad=() hang=0 via_proxy=1 noroute=() v6=0 pth
@@ -977,7 +993,7 @@ check_dns() {
   done
 
   local why="не найдены"
-  [[ $hang == 1 ]] && why="DNS не отвечает за $DNS_TIMEOUT с"
+  [[ $hang == 1 ]] && why="DNS не отвечает за $DNS_TIMEOUT с" && DNS_HANG=1
   if [[ ${#bad[@]} -eq 0 ]]; then
     DNS_STATE=ok
     step_ok "имена разрешаются: $total из $total"
@@ -990,7 +1006,6 @@ check_dns() {
   fi
 
   if [[ ${#noroute[@]} -gt 0 ]]; then
-    V6_NOROUTE=1
     step_warn "IPv6: у ${noroute[*]} есть адрес IPv6, а маршрута IPv6 нет — агент тратит попытку на IPv6, прежде чем перейти на IPv4"
   elif [[ $v6 == 1 ]]; then
     step_ok "IPv6: адреса есть, маршрут есть"
@@ -1002,7 +1017,6 @@ check_dns() {
 # Удачных $1 из $2 → ok | partial | down.
 state_of() { if (($1 == 0)); then printf down; elif (($1 < $2)); then printf partial; else printf ok; fi; }
 
-# shellcheck disable=SC2034  # итог читает вердикт (задача 6)
 check_reach() {
   if [[ -n $PROXY_URL ]]; then
     section "Эндпоинты агентов (через прокси $(mask_proxy_url "$PROXY_URL"), и для сравнения напрямую)"
@@ -1056,7 +1070,6 @@ check_reach() {
   fi
 }
 
-# shellcheck disable=SC2034  # итог читает вердикт (задача 6)
 check_tls() {
   section "TLS"
   local line host pth rc iss org orgs=() seen="|" flagged=0 any=0
@@ -1069,7 +1082,7 @@ check_tls() {
     org=$(issuer_org "$iss")
     any=1
     if [[ $rc == 60 ]]; then
-      flagged=1; TLS_STATE=untrusted
+      flagged=1; TLS_STATE=untrusted; TLS_ORG=${org:-не назван}
       step_fail "$host: сертификат не проверяется, издатель «${org:-не назван}» — TLS перехватывает антивирус или корпоративный прокси, его корневого сертификата в системе нет"
     elif [[ -z $org ]]; then
       continue
@@ -1092,17 +1105,162 @@ check_tls() {
 }
 
 # ---------- вердикт ----------
+# Одна строка «где рвётся» и одна «что поменять». Правила идут по пути запроса агента:
+# среда → мост до прокси → прокси → DNS → TLS → хосты. Срабатывает первое подходящее:
+# поломка выше по пути объясняет ✗ ниже (мёртвый прокси роняет и все хосты).
+# Совет только печатается: скрипт ничего не меняет.
+
+V_WHERE="" V_FIX=""
+set_verdict() { V_WHERE=$1 V_FIX=$2; }
+
+# Хосты через запятую.
+join_hosts() { local IFS=,; local s="$*"; printf '%s' "${s//,/, }"; }
+
+# Разбор нужных хостов, недоступных по пути агента → NF_ALL (все), NF_NOPROXY (идут
+# напрямую из-за no_proxy, а через прокси отвечают), NF_PXONLY (через прокси нет,
+# напрямую да), NF_PX (на пути через прокси), NF_PX_TLS (из них — сертификат, код 60),
+# NF_WHY — причина у первого.
+NF_ALL=() NF_NOPROXY=() NF_PXONLY=() NF_PX=0 NF_PX_TLS=0 NF_WHY=""
+need_failures() {
+  local line host imp pth rc
+  NF_ALL=() NF_NOPROXY=() NF_PXONLY=() NF_PX=0 NF_PX_TLS=0 NF_WHY=""
+  for line in "${EP_HOSTS[@]}"; do
+    host=${line%%$'\t'*} imp=${line#*$'\t'}
+    [[ $imp == нужен ]] || continue
+    pth=$(agent_path "$host")
+    rc=${R[$host.${pth}_rc]:-}
+    [[ $rc == 0 ]] && continue
+    NF_ALL+=("$host")
+    [[ -z $NF_WHY ]] && NF_WHY=$(curl_why "$rc")
+    if [[ $pth == d && -n $PROXY_URL && ${R[$host.p_rc]:-} == 0 ]]; then NF_NOPROXY+=("$host"); fi
+    if [[ $pth == p ]]; then
+      NF_PX=$((NF_PX + 1))
+      [[ $rc == 60 ]] && NF_PX_TLS=$((NF_PX_TLS + 1))
+      [[ ${R[$host.d_rc]:-} == 0 ]] && NF_PXONLY+=("$host")
+    fi
+  done
+}
+
+decide() {
+  local n=$PROBE_TRIES restart="затем в Windows «wsl --shutdown»"
+  need_failures
+
+  # Мост до прокси теряет подключения.
+  if [[ $BRIDGE == broken ]]; then
+    if [[ $BRIDGE_WSL == 1 && $WSL_MODE == mirrored ]]; then
+      local own=""
+      [[ $PROXY_FROM_WINDOWS == 1 ]] || own="; $PROXY_VAR задан не из Windows — уберите его там, где задали"
+      set_verdict "мост WSL↔Windows до прокси: в режиме mirrored подключения к прокси-порту теряются ($BRIDGE_OK/$n)" \
+        "в .wslconfig в [wsl2] поставьте networkingMode=NAT и autoProxy=false, $restart: агент пойдёт без прокси, через сеть Windows$own"
+    elif [[ $BRIDGE_WSL == 1 ]]; then
+      set_verdict "мост WSL↔Windows до прокси (шлюз NAT): подключения к прокси-порту теряются ($BRIDGE_OK/$n)" \
+        "проверьте, что прокси-клиент Windows принимает подключения из локальной сети и брандмауэр Windows пропускает порт $PX_PORT из сети WSL"
+    elif [[ $EP_DIRECT == ok ]]; then
+      set_verdict "связь до прокси: подключения к прокси-порту теряются ($BRIDGE_OK/$n)" \
+        "напрямую хосты доступны — уберите $PROXY_VAR или почините сеть до прокси"
+    else
+      set_verdict "связь до прокси: подключения к прокси-порту теряются ($BRIDGE_OK/$n)" \
+        "проверьте прокси и сеть до него: перегружен или с потерями"
+    fi
+    return 1
+  fi
+
+  # Прокси-порт не отвечает совсем.
+  if [[ $BRIDGE == down ]]; then
+    if [[ $ENV_KIND == wsl2 && $WSL_MODE == nat ]] && is_loopback "$PX_HOST"; then
+      if [[ $PROXY_FROM_WINDOWS == 1 ]]; then
+        set_verdict "прокси: $PROXY_VAR указывает на 127.0.0.1, а в режиме NAT это сам WSL — там прокси нет" \
+          "переменные прокси ставит WSL из настроек Windows: в .wslconfig в [wsl2] поставьте autoProxy=false, $restart"
+      else
+        set_verdict "прокси: $PROXY_VAR указывает на 127.0.0.1, а в режиме NAT это сам WSL — там прокси нет" \
+          "уберите $PROXY_VAR или укажите в нём адрес Windows — шлюз из «ip route show default»"
+      fi
+    else
+      local how="нет ответа"
+      [[ $BRIDGE_REFUSED -eq $n ]] && how="в подключении отказано"
+      if [[ $EP_DIRECT == ok ]]; then
+        set_verdict "прокси: порт не отвечает (0/$n, $how)" \
+          "запустите прокси-клиент или исправьте адрес в $PROXY_VAR; напрямую хосты доступны — можно и убрать $PROXY_VAR"
+      else
+        set_verdict "прокси: порт не отвечает (0/$n, $how)" \
+          "запустите прокси-клиент или исправьте адрес в $PROXY_VAR"
+      fi
+    fi
+    return 1
+  fi
+
+  # Порт прокси отвечает, но к хостам агентов прокси не пропускает.
+  if [[ -n $PROXY_URL && $EP_PROXY == down && $NF_PX -gt 0 && $NF_PX_TLS -lt $NF_PX ]]; then
+    if [[ $EP_DIRECT == ok ]]; then
+      set_verdict "прокси: порт отвечает, но к хостам агентов не пропускает ($NF_WHY)" \
+        "напрямую хосты доступны — уберите $PROXY_VAR или проверьте, подключён ли прокси-клиент к своему серверу"
+    else
+      set_verdict "прокси: порт отвечает, но к хостам агентов не пропускает ($NF_WHY)" \
+        "проверьте прокси-клиент: подключён ли он к своему серверу и пропускает ли домены агентов"
+    fi
+    return 1
+  fi
+
+  if [[ $DNS_STATE == fail ]]; then
+    local why="имена не найдены"
+    [[ $DNS_HANG == 1 ]] && why="DNS не отвечает"
+    if [[ $ENV_KIND == wsl2 ]]; then
+      set_verdict "DNS: имена хостов агентов не разрешаются ($why)" \
+        "проверьте nameserver в /etc/resolv.conf; в WSL этот файл пишет сам WSL — посмотрите generateResolvConf в /etc/wsl.conf и dnsTunneling в .wslconfig"
+    else
+      set_verdict "DNS: имена хостов агентов не разрешаются ($why)" \
+        "проверьте nameserver в /etc/resolv.conf или «resolvectl status», если работает systemd-resolved"
+    fi
+    return 1
+  fi
+
+  if [[ $TLS_STATE == untrusted ]]; then
+    set_verdict "TLS: сертификаты хостов подменяет перехватчик (издатель «$TLS_ORG»), его корневого сертификата в системе нет" \
+      "исключите хосты агентов из проверки HTTPS в антивирусе или прокси, либо положите его корневой сертификат в /usr/local/share/ca-certificates/ и выполните «sudo update-ca-certificates»"
+    return 1
+  fi
+
+  if [[ $EP_STATE == fail ]]; then
+    if [[ ${#NF_NOPROXY[@]} -gt 0 ]]; then
+      set_verdict "no_proxy: $(join_hosts "${NF_NOPROXY[@]}") идут мимо прокси, а напрямую недоступны" \
+        "уберите их домены из no_proxy — через прокси они отвечают"
+    elif [[ ${#NF_PXONLY[@]} -gt 0 ]]; then
+      set_verdict "прокси не пропускает к $(join_hosts "${NF_PXONLY[@]}"), а напрямую они доступны" \
+        "проверьте правила прокси-клиента для этих доменов или добавьте их в no_proxy"
+    elif [[ -z $PROXY_URL && $EP_DIRECT == down ]]; then
+      if [[ $ENV_KIND == wsl2 && $WSL_MODE == mirrored ]]; then
+        set_verdict "прямой выход: хосты агентов недоступны ($NF_WHY), прокси не задан" \
+          "в mirrored VPN Windows в режиме TUN забирает прямой трафик WSL: в .wslconfig в [wsl2] поставьте networkingMode=NAT, $restart"
+      else
+        set_verdict "прямой выход: хосты агентов недоступны ($NF_WHY), прокси не задан" \
+          "проверьте подключение к интернету и VPN; если сеть выпускает только через прокси — задайте https_proxy"
+      fi
+    else
+      set_verdict "хосты: недоступны $(join_hosts "${NF_ALL[@]}") ($NF_WHY)" \
+        "их блокирует сеть, VPN или фаервол — проверьте правила для этих доменов; если сбой разовый, повторите прогон"
+    fi
+    return 1
+  fi
+
+  # Поломка есть, а правила для неё нет — честно отправить к шагам с ✗.
+  if [[ $FAILS -gt 0 ]]; then
+    set_verdict "в шагах, отмеченных ✗ выше" "смотрите подсказки под этими шагами"
+    return 1
+  fi
+
+  set_verdict "нигде, сеть здорова" \
+    "ничего; если агент всё равно виснет — причина не в сети этой машины"
+  return 0
+}
 
 verdict() {
   section "Итог"
-  if [[ $FAILS -gt 0 ]]; then
-    say "  Найдено поломок: $FAILS"
-    [[ $WARNS -gt 0 ]] && say "  Предупреждений: $WARNS"
-    return 1
-  fi
-  say "  Поломок не найдено"
-  [[ $WARNS -gt 0 ]] && say "  Предупреждений: $WARNS"
-  return 0
+  local rc=0
+  decide || rc=1
+  say "  Где рвётся: $V_WHERE"
+  say "  Что поменять: $V_FIX"
+  [[ $WARNS -gt 0 ]] && say "  Предупреждений: $WARNS (отмечены «!» выше)"
+  return "$rc"
 }
 
 main() {

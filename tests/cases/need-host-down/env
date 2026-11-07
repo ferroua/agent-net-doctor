@@ -1,0 +1,2 @@
+# Стоит только Codex; API не устанавливает TLS ни с первой, ни со второй попытки.
+STUB_CURL_DIRECT_api_openai_com=35

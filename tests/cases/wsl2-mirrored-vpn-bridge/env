@@ -1,0 +1,8 @@
+WSL_DISTRO_NAME=Ubuntu
+# Классика: mirrored отдал default-маршрут TUN-адаптеру VPN, прямой трафик в чёрную дыру;
+# прокси импортирован из Windows, а проброс localhost теряет SYN.
+http_proxy=http://127.0.0.1:10809
+no_proxy=localhost,127.0.0.1,<local>
+STUB_CONNECT_10809=1.005 - - 1.004 - 1.006 - - 1.005 -
+STUB_CONNECT_47001=0.000210*10
+STUB_CURL_DIRECT=28

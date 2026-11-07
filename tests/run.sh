@@ -5,6 +5,8 @@
 #
 # Сценарий — папка tests/cases/<имя>/:
 #   code     ожидаемый код выхода (обязательно)
+#   verdict  ожидаемая строка «Где рвётся: …» без этих слов (обязательно);
+#            «нет» — скрипт до итога не доходит (справка, отказ среды)
 #   args     ключи скрипта, по одному на строку
 #   env      переменные окружения KEY=VALUE, по одной на строку
 #   bin/     заглушки команд, идут в PATH первыми
@@ -20,7 +22,8 @@
 # Эндпоинты, DNS и TLS: заглушки stubs/curl и stubs/getent, ответы — в env
 # сценария: STUB_CURL_DIRECT / STUB_CURL_PROXY (ok, ok:<издатель>, 60:<издатель>,
 # код ошибки curl), STUB_DNS (4, 46, 6, fail, hang). Для одного хоста — с суффиксом
-# _<хост>, например STUB_CURL_DIRECT_ab_chatgpt_com=7. Подробно — в шапках заглушек.
+# _<хост>, например STUB_CURL_DIRECT_ab_chatgpt_com=7; «56,ok» — ответы по запросам
+# (повтор запроса скрипта). Подробно — в шапках заглушек.
 #
 # Запуск: bash tests/run.sh [имя-сценария ...]
 
@@ -69,6 +72,23 @@ run_case() {
 
   want=$(lines "$dir/code")
   [[ $code == "$want" ]] || problems+=("код выхода $code, ожидался $want")
+
+  # Вердикт: ровно один, и тот, что ожидался.
+  local got_v n_v want_v
+  got_v=$(grep '^  Где рвётся: ' <<<"$out" | sed 's/^  Где рвётся: //')
+  n_v=$(grep -c '^  Где рвётся: ' <<<"$out")
+  if [[ ! -f $dir/verdict ]]; then
+    problems+=("нет файла verdict")
+  else
+    want_v=$(lines "$dir/verdict")
+    if [[ $want_v == нет ]]; then
+      [[ $n_v -eq 0 ]] || problems+=("вердикт не ожидался, а есть: $got_v")
+    elif [[ $n_v -ne 1 ]]; then
+      problems+=("вердиктов $n_v, ожидался один: $want_v")
+    elif [[ $got_v != "$want_v" ]]; then
+      problems+=("вердикт: $got_v" "ожидался: $want_v")
+    fi
+  fi
   while IFS= read -r l; do
     grep -qF -- "$l" <<<"$out" || problems+=("нет строки: $l")
   done < <(lines "$dir/expect")

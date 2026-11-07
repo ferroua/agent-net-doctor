@@ -1,0 +1,3 @@
+# Первый запрос оборвался, второй прошёл: разовый сбой — не поломка.
+STUB_CURL_DIRECT_api_anthropic_com=56,ok
+STUB_CURL_DIRECT_chatgpt_com=28,ok

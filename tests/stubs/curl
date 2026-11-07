@@ -9,6 +9,8 @@
 #   ok:<издатель> HTTP 404 с этим издателем («C=US; O=…; CN=…»)
 #   60:<издатель> сертификат не проверяется; с -k — ответ с этим издателем
 #   <число>       код ошибки curl (6 имя, 7 отказ, 28 тайм-аут, 35 TLS…)
+#   a,b,…         по запросам: первый получает a, второй b, дальше — последний
+#                 (повтор запроса скрипта; вызов с -k счёт не двигает)
 mode=PROXY url="" insecure=0
 for a in "$@"; do
   [[ $a == --noproxy ]] && mode=DIRECT
@@ -22,6 +24,14 @@ key=${host//[^A-Za-z0-9]/_}
 var="STUB_CURL_${mode}_$key"
 val=${!var:-}
 if [[ -z $val ]]; then var="STUB_CURL_$mode"; val=${!var:-ok}; fi
+if [[ $val == *,* ]]; then
+  IFS=, read -ra seq <<<"$val"
+  state="${HOME:-/tmp}/.stub-curl-$mode-$key"
+  n=$(cat "$state" 2>/dev/null || echo 0)
+  [[ $insecure == 1 ]] && n=$((n > 0 ? n - 1 : 0)) || echo $((n + 1)) > "$state"
+  ((n >= ${#seq[@]})) && n=$((${#seq[@]} - 1))
+  val=${seq[$n]}
+fi
 
 answer() { echo "*  issuer: $1" >&2; printf '404 0.120000'; exit 0; }
 case $val in

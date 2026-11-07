@@ -1,0 +1,4 @@
+#!/bin/sh
+# Шлюз NAT — адрес Windows.
+[ "$1 $2 $3" = "route show default" ] && { echo "default via 172.20.48.1 dev eth0 proto kernel"; exit 0; }
+exit 1

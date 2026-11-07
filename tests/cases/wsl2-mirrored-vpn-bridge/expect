@@ -1,0 +1,3 @@
+networkingMode=NAT и autoProxy=false
+затем в Windows «wsl --shutdown»
+Напрямую не доступен ни один хост

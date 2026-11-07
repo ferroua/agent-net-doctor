@@ -1,0 +1,6 @@
+WSL_DISTRO_NAME=Ubuntu
+# Режим уже NAT, а autoProxy оставил переменные Windows: 127.0.0.1 — это сам WSL.
+http_proxy=http://127.0.0.1:10809
+no_proxy=localhost,<local>
+STUB_CONNECT_10809=r*10
+STUB_CURL_PROXY=7

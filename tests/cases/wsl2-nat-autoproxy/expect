@@ -1,0 +1,1 @@
+Что поменять: переменные прокси ставит WSL из настроек Windows: в .wslconfig в [wsl2] поставьте autoProxy=false, затем в Windows «wsl --shutdown»
