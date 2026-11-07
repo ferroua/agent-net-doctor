@@ -1,0 +1,93 @@
+name: Отчёт о прогоне
+description: Запустили net-doctor.sh — расскажите, что он показал и совпал ли вердикт
+title: "Прогон: "
+labels: ["прогон"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо, что прогнали скрипт. Отчёт нужен даже на здоровой сети: так видно,
+        что вердикт «сеть здорова» не врёт.
+
+        Вывод скрипта можно вставить целиком: адреса в нём скрыты. Не запускайте
+        для отчёта с `--show-ip` и не вставляйте ключи, пароли и `.env`.
+  - type: dropdown
+    id: env
+    attributes:
+      label: Среда
+      options:
+        - WSL2 + Ubuntu
+        - WSL2, другой дистрибутив
+        - Ubuntu без WSL
+        - Другое (напишите ниже)
+    validations:
+      required: true
+  - type: dropdown
+    id: wsl-mode
+    attributes:
+      label: Режим сети WSL
+      description: Скрипт печатает его в разделе «Настройки WSL».
+      options:
+        - nat
+        - mirrored
+        - не WSL
+        - не знаю
+    validations:
+      required: true
+  - type: input
+    id: agents
+    attributes:
+      label: Агенты и версии
+      description: Из раздела «Агенты» вывода или `claude --version`, `codex --version`.
+      placeholder: Claude Code 2.1.319, Codex 0.155.1
+    validations:
+      required: true
+  - type: input
+    id: vpn
+    attributes:
+      label: VPN или прокси
+      description: Что включено на машине. Название клиента, без адресов.
+      placeholder: VPN-клиент в режиме TUN / прокси на Windows / ничего
+  - type: textarea
+    id: symptom
+    attributes:
+      label: Что было с агентом до прогона
+      placeholder: Висит на «Waiting for API response» / ConnectionRefused / всё работает
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Вывод скрипта
+      description: Весь вывод `bash net-doctor.sh`, от первой строки до «Итог».
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: exit-code
+    attributes:
+      label: Код выхода
+      description: "`echo $?` сразу после прогона."
+      options:
+        - 0 — сеть здорова
+        - 1 — найдена поломка
+        - 2 — среда не поддерживается
+        - не посмотрел
+    validations:
+      required: true
+  - type: dropdown
+    id: verdict-match
+    attributes:
+      label: Совпал ли вердикт с вашей ситуацией
+      options:
+        - Да — поменял, что советовал скрипт, агент перестал виснуть
+        - Да — сеть здорова, и агент действительно работает
+        - Нет — помогло другое (напишите ниже, что)
+        - Пока не знаю — совет ещё не пробовал
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Что ещё
+      description: Где застряли по README, что было непонятно, что помогло на самом деле.
