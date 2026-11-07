@@ -8,7 +8,7 @@
 В терминале WSL2 или Ubuntu, там же, где запускаете агента:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/ferroua/agent-net-doctor/main/net-doctor.sh
+curl -fsSLO https://raw.githubusercontent.com/ferroua/agent-net-doctor/v0.1.0/net-doctor.sh
 less net-doctor.sh      # по желанию: прочитать, что скрипт делает
 bash net-doctor.sh
 ```
@@ -16,7 +16,7 @@ bash net-doctor.sh
 Или через git:
 
 ```bash
-git clone https://github.com/ferroua/agent-net-doctor.git
+git clone --branch v0.1.0 https://github.com/ferroua/agent-net-doctor.git
 bash agent-net-doctor/net-doctor.sh
 ```
 
@@ -36,7 +36,7 @@ bash agent-net-doctor/net-doctor.sh
 Здоровая сеть. Настоящий прогон: WSL2, режим `nat`, оба агента установлены.
 
 ```text
-agent-net-doctor 0.1.0-dev
+agent-net-doctor 0.1.0
 
 Среда
   ✓ WSL2, дистрибутив Ubuntu-24.04 (Ubuntu 24.04.4 LTS)

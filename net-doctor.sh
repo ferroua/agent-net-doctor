@@ -13,7 +13,7 @@
 
 set -u
 
-ND_VERSION="0.1.0-dev"
+ND_VERSION="0.1.0"
 ND_ROOT="${ND_ROOT:-}"
 
 SHOW_IP=0
