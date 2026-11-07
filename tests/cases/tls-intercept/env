@@ -1,0 +1,2 @@
+# Антивирус или корпоративный прокси подменяет сертификат, система ему доверяет.
+STUB_CURL_DIRECT=ok:C=US; O=Corp Inspection; CN=Corp SSL Inspection CA

@@ -1,0 +1,4 @@
+✗ имена не разрешаются (DNS не отвечает за 4 с): api.anthropic.com platform.claude.com
+✗ api.anthropic.com (нужен): имя не разрешается
+! downloads.claude.ai (доп, основная работа не страдает): имя не разрешается
+– ни один хост не ответил по TLS

@@ -17,6 +17,11 @@
 # отказ, повтор). Контрольный сервер — своя заглушка bin/python3, печатает порт.
 # ND_PYTHON=несуществующее-имя — сценарий «python3 нет».
 #
+# Эндпоинты, DNS и TLS: заглушки stubs/curl и stubs/getent, ответы — в env
+# сценария: STUB_CURL_DIRECT / STUB_CURL_PROXY (ok, ok:<издатель>, 60:<издатель>,
+# код ошибки curl), STUB_DNS (4, 46, 6, fail, hang). Для одного хоста — с суффиксом
+# _<хост>, например STUB_CURL_DIRECT_ab_chatgpt_com=7. Подробно — в шапках заглушек.
+#
 # Запуск: bash tests/run.sh [имя-сценария ...]
 
 set -u
@@ -110,7 +115,26 @@ unit() {
   check "прокси: localhost.имя скрыто" 0 mask_proxy_url "http://localhost.corp.example:3128" "http://***:3128"
   check "текст: «/» в пароле"       0 mask_text "http://u:pa/ss@1.2.3.4:80" "http://***@x.x.x.x:80"
   check "прокси: show-ip"          1 mask_proxy_url "http://a:b@proxy.corp.example:3128" "http://a:***@proxy.corp.example:3128"
+
+  # Встроенный в скрипт список хостов — точная копия hosts/*.txt.
+  local want have f id
+  want=$(for f in "$TESTS_DIR"/../hosts/*.txt; do
+           id=$(basename "$f" .txt)
+           grep -v -e '^#' -e '^[[:space:]]*$' "$f" | cut -f1,2 | sed "s/^/$id /; s/\t/ /"
+         done | sort)
+  have=$(grep -v '^[[:space:]]*$' <<<"$AGENT_HOSTS" | sort)
+  if [[ $want == "$have" ]]; then ok "хосты в скрипте = hosts/"
+  else bad "хосты в скрипте = hosts/" "$(diff <(echo "$want") <(echo "$have"))"; fi
+
+  check "издатель: O из строки"    0 issuer_org "C=US; O=Let's Encrypt; CN=R11" "Let's Encrypt"
+  check "no_proxy: суффикс"        0 np_check "api.openai.com|localhost,.openai.com" "да"
+  check "no_proxy: чужой хост"     0 np_check "chatgpt.com|.openai.com" "нет"
+  check "no_proxy: «*»"            0 np_check "chatgpt.com|*" "да"
 }
+
+# Обёртка для check: «хост|список» → да/нет.
+# shellcheck disable=SC2034  # no_proxy читает in_no_proxy
+np_check() { local no_proxy=${1#*|} NO_PROXY=""; if in_no_proxy "${1%%|*}"; then echo да; else echo нет; fi; }
 
 echo "Функции скрытия адресов"
 unit

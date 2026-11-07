@@ -36,6 +36,12 @@ WARNS=0
   CODEX_VER=""
   BRIDGE=""            # ok | broken | down | slow | noisy | skipped — итог замера до прокси
   BRIDGE_WSL=0         # 1 — прокси за мостом WSL↔Windows
+  DNS_STATE=""         # ok | fail | proxy-only — имена хостов агентов
+  V6_NOROUTE=0         # 1 — у хоста есть адрес IPv6, а маршрута IPv6 нет
+  EP_STATE=""          # ok | fail | extra — нужные хосты доступны / нет / не все доп
+  EP_DIRECT=""         # ok | down | partial | skipped — прямой доступ (без прокси)
+  EP_PROXY=""          # ok | down | partial | skipped — через прокси
+  TLS_STATE=""         # ok | intercept | untrusted | skipped
 }
 
 # Для тестов: ND_PYTHON — имя или путь python3 (по умолчанию python3).
@@ -512,6 +518,19 @@ PROBE_TIMEOUT=2       # секунд на подключение: ловит п�
 SLOW_US=500000        # удачное подключение дольше 0,5 с — признак потерь SYN
 FAST_US=100000        # контрольный порт «быстрый»: 10/10 и медиана меньше 0,1 с
 
+# Прокси, которым пойдёт агент: первый заданный по порядку ниже → PROXY_VAR, PROXY_URL.
+PROXY_VAR="" PROXY_URL=""
+pick_proxy() {
+  local name
+  PROXY_VAR="" PROXY_URL=""
+  for name in https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY; do
+    [[ -n ${!name:-} ]] || continue
+    PROXY_VAR=$name PROXY_URL=${!name}
+    return 0
+  done
+  return 1
+}
+
 # Хост и порт из адреса прокси → PX_HOST, PX_PORT. Порт по умолчанию — по схеме.
 PX_HOST="" PX_PORT=""
 parse_proxy_url() {
@@ -646,12 +665,9 @@ default_gw() {
 
 # shellcheck disable=SC2034  # BRIDGE, BRIDGE_WSL читает вердикт (задача 6)
 check_bridge() {
-  local name val="" where gw rc px_ok px_slow px_max px_med px_line px_refused
-  for name in https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY; do
-    val=${!name:-}
-    [[ -n $val ]] && break
-  done
-  [[ -n $val ]] || return 0
+  local name val where gw rc px_ok px_slow px_max px_med px_line px_refused
+  pick_proxy || return 0
+  name=$PROXY_VAR val=$PROXY_URL
 
   if ! parse_proxy_url "$val"; then
     section "Подключение к прокси"
@@ -681,7 +697,7 @@ check_bridge() {
 
   # Контрольная серия.
   local ctl=0 ctl_ok=0 ctl_med=0 ctl_line=""
-  trap stop_control EXIT
+  trap cleanup EXIT
   rc=0; start_control || rc=$?
   if [[ $rc -eq 0 ]]; then
     probe_series 127.0.0.1 "$CTL_PORT"
@@ -733,6 +749,343 @@ check_bridge() {
   return 0
 }
 
+# ---------- эндпоинты, DNS/IPv6, TLS ----------
+# Доступность хоста судим по TLS и ответу HTTP, а не по TCP: VPN в режиме TUN
+# сам отвечает на рукопожатие TCP к любому адресу, и подключение ничего не доказывает.
+# Любой код HTTP (200, 403, 404…) — хост доступен: сервер ответил по TLS.
+
+# Хосты агентов — копия hosts/*.txt (сняты с бинарей; tests/run.sh сверяет копию).
+# Скрипт скачивают одним файлом, поэтому список встроен.
+# Формат: агент хост важность (нужен — без него агент не работает, доп — нет).
+AGENT_HOSTS='
+claude-code api.anthropic.com нужен
+claude-code platform.claude.com нужен
+claude-code downloads.claude.ai доп
+claude-code mcp-proxy.anthropic.com доп
+claude-code http-intake.logs.us5.datadoghq.com доп
+codex api.openai.com нужен
+codex chatgpt.com нужен
+codex auth.openai.com нужен
+codex ab.chatgpt.com доп
+'
+
+# Издатели (поле O= сертификата), которые считаются публичными.
+# У хостов агентов 08.11.2026: Google Trust Services, Let's Encrypt, DigiCert.
+# Остальные — крупные публичные УЦ, на случай смены издателя.
+PUBLIC_CAS=("Google Trust Services" "Let's Encrypt" "DigiCert" "Sectigo" "Amazon"
+            "GlobalSign" "Cloudflare" "Microsoft Corporation" "Entrust" "IdenTrust"
+            "GoDaddy" "Starfield" "SSL Corporation" "ZeroSSL" "COMODO" "Baltimore")
+
+EP_CONNECT=5          # секунд на подключение
+EP_MAX=10             # секунд на весь запрос
+DNS_TIMEOUT=4         # секунд на разрешение имени
+
+EP_TMP=""
+cleanup() {
+  stop_control
+  [[ -n $EP_TMP ]] && rm -rf "$EP_TMP"
+  EP_TMP=""
+}
+
+# Хосты для проверки → EP_HOSTS (хост<TAB>важность). Агентов нет — хосты обоих.
+EP_HOSTS=()
+pick_hosts() {
+  local agent host imp a want seen=" "
+  EP_HOSTS=()
+  while read -r agent host imp; do
+    [[ -n $agent ]] || continue
+    want=0
+    if [[ ${#AGENTS[@]} -eq 0 ]]; then want=1; fi
+    for a in "${AGENTS[@]}"; do [[ $a == "$agent" ]] && want=1; done
+    [[ $want == 1 && $seen != *" $host "* ]] || continue
+    seen+="$host "
+    EP_HOSTS+=("$host"$'\t'"$imp")
+  done <<<"$AGENT_HOSTS"
+}
+
+# Идёт ли агент к хосту мимо прокси: хост в no_proxy (точно, по суффиксу или «*»).
+in_no_proxy() {
+  local host=$1 e items=()
+  IFS=, read -ra items <<<"${no_proxy:-${NO_PROXY:-}}"
+  for e in "${items[@]}"; do
+    e=$(trim "$e"); e=${e#.}; e=${e#\*.}
+    [[ -z $e ]] && continue
+    [[ $e == '*' || $host == "$e" || $host == *."$e" ]] && return 0
+  done
+  return 1
+}
+
+# Один запрос HTTPS. Печатает строки «ключ<TAB>значение» с префиксом $3:
+# rc (код curl), code (HTTP), time (с), iss (издатель сертификата).
+# Подробный вывод curl идёт во временный файл и сразу удаляется:
+# в нём бывает заголовок авторизации прокси.
+probe_https() { # хост  direct|proxy  префикс
+  local host=$1 mode=$2 p=$3 out rc iss err args
+  err=$(mktemp "$EP_TMP/err.XXXXXX")
+  args=(-sS -o /dev/null -v --connect-timeout "$EP_CONNECT" --max-time "$EP_MAX"
+        -w '%{http_code} %{time_total}')
+  if [[ $mode == proxy ]]; then
+    out=$(env -u no_proxy -u NO_PROXY curl "${args[@]}" -x "$PROXY_URL" "https://$host/" 2>"$err")
+  else
+    out=$(curl "${args[@]}" --noproxy '*' "https://$host/" 2>"$err")
+  fi
+  rc=$?
+  iss=$(sed -n 's/^\*[[:space:]]*issuer:[[:space:]]*//p' "$err" | head -n1)
+  # Сертификат не проверился — узнать издателя без проверки (-k), только ради имени.
+  if [[ $rc -eq 60 && -z $iss ]]; then
+    if [[ $mode == proxy ]]; then
+      env -u no_proxy -u NO_PROXY curl "${args[@]}" -k -x "$PROXY_URL" "https://$host/" >/dev/null 2>"$err"
+    else
+      curl "${args[@]}" -k --noproxy '*' "https://$host/" >/dev/null 2>"$err"
+    fi
+    iss=$(sed -n 's/^\*[[:space:]]*issuer:[[:space:]]*//p' "$err" | head -n1)
+  fi
+  rm -f "$err"
+  printf '%s_rc\t%s\n%s_code\t%s\n%s_time\t%s\n%s_iss\t%s\n' \
+    "$p" "$rc" "$p" "${out%% *}" "$p" "${out##* }" "$p" "${iss//$'\r'/}"
+}
+
+# Всё о хосте: DNS, IPv6, прямой доступ, через прокси. Пишет в файл $2.
+probe_host() { # хост  файл
+  local host=$1 f=$2 a4="" a6="" rc4=0 rc6=0 v6route=""
+  {
+    a4=$(timeout "$DNS_TIMEOUT" getent ahostsv4 "$host" 2>/dev/null) || rc4=$?
+    a6=$(timeout "$DNS_TIMEOUT" getent ahostsv6 "$host" 2>/dev/null) || rc6=$?
+    a4=$(awk 'NR==1{print $1}' <<<"$a4")
+    a6=$(awk '$1 !~ /^::ffff:/ {print $1; exit}' <<<"$a6")
+    if [[ -n $a6 ]] && command -v ip >/dev/null 2>&1; then
+      if ip -6 route get "$a6" >/dev/null 2>&1; then v6route=1; else v6route=0; fi
+    fi
+    printf 'a4\t%s\nrc4\t%s\na6\t%s\nrc6\t%s\nv6route\t%s\n' "$a4" "$rc4" "$a6" "$rc6" "$v6route"
+    probe_https "$host" direct d
+    [[ -n $PROXY_URL ]] && probe_https "$host" proxy p
+  } >"$f"
+}
+
+# Код curl → что случилось.
+curl_why() {
+  case $1 in
+    5)  printf 'имя прокси не разрешается' ;;
+    6)  printf 'имя не разрешается' ;;
+    7)  printf 'в подключении отказано' ;;
+    28) printf 'нет ответа' ;;
+    35) printf 'TLS не установлен' ;;
+    52) printf 'пустой ответ' ;;
+    56) printf 'соединение оборвано' ;;
+    60) printf 'сертификат не проверяется' ;;
+    97) printf 'прокси SOCKS не пустил' ;;
+    *)  printf 'ошибка curl %s' "$1" ;;
+  esac
+}
+
+# Результат пути (d или p) хоста $1 одной фразой.
+path_txt() {
+  local rc=${R[$1.$2_rc]:-} code=${R[$1.$2_code]:-} t=${R[$1.$2_time]:-0}
+  if [[ $rc == 0 ]]; then
+    printf 'ответил (HTTP %s) за %s с' "$code" "$(fmt_s "$(to_us "$t")")"
+  elif [[ $rc == 28 ]]; then
+    printf 'нет ответа за %s с' "$(fmt_s "$(to_us "$t")")"
+  else
+    curl_why "$rc"
+  fi
+}
+
+# Организация издателя из строки «C=US; O=Let's Encrypt; CN=R11».
+issuer_org() {
+  local s=$1
+  if [[ $s =~ (^|[;,/][[:space:]]*)O[[:space:]]*=[[:space:]]*([^;,/]+) ]]; then
+    trim "${BASH_REMATCH[2]}"
+  else
+    printf '%s' "$s"
+  fi
+}
+
+is_public_ca() {
+  local o=$1 c
+  for c in "${PUBLIC_CAS[@]}"; do [[ ${o,,} == "${c,,}"* ]] && return 0; done
+  return 1
+}
+
+declare -A R=()        # результаты замеров: R[хост.ключ]
+
+check_endpoints() {
+  local line host imp f k v
+  pick_proxy || true
+  pick_hosts
+
+  if ! command -v curl >/dev/null 2>&1; then
+    section "Эндпоинты агентов"
+    step_skip "curl не найден: эндпоинты, DNS и TLS не проверены (поставьте curl)"
+    EP_STATE=skipped EP_DIRECT=skipped EP_PROXY=skipped TLS_STATE=skipped
+    return 0
+  fi
+
+  EP_TMP=$(mktemp -d) || return 0
+  trap cleanup EXIT
+  # Хосты меряются параллельно: недоступный хост ждёт до EP_MAX секунд.
+  local i=0 pids=()
+  for line in "${EP_HOSTS[@]}"; do
+    host=${line%%$'\t'*}
+    probe_host "$host" "$EP_TMP/h$i" &
+    pids+=($!)
+    i=$((i + 1))
+  done
+  wait "${pids[@]}" 2>/dev/null
+  i=0
+  for line in "${EP_HOSTS[@]}"; do
+    host=${line%%$'\t'*}
+    while IFS=$'\t' read -r k v; do
+      [[ -n $k ]] && R[$host.$k]=$v
+    done <"$EP_TMP/h$i"
+    i=$((i + 1))
+  done
+
+  check_dns
+  check_reach
+  check_tls
+  cleanup
+  return 0
+}
+
+# Путь агента к хосту: p — через прокси, d — напрямую.
+agent_path() {
+  if [[ -n $PROXY_URL ]] && ! in_no_proxy "$1"; then printf p; else printf d; fi
+}
+
+# shellcheck disable=SC2034  # итог читает вердикт (задача 6)
+check_dns() {
+  section "DNS и IPv6"
+  local line host total=0 bad=() hang=0 via_proxy=1 noroute=() v6=0 pth
+  for line in "${EP_HOSTS[@]}"; do
+    host=${line%%$'\t'*}
+    total=$((total + 1))
+    if [[ -z ${R[$host.a4]:-} && -z ${R[$host.a6]:-} ]]; then
+      bad+=("$host")
+      [[ ${R[$host.rc4]:-} == 124 || ${R[$host.rc6]:-} == 124 ]] && hang=1
+      pth=$(agent_path "$host")
+      [[ $pth == p && ${R[$host.p_rc]:-} == 0 ]] || via_proxy=0
+    fi
+    if [[ -n ${R[$host.a6]:-} ]]; then
+      v6=1
+      [[ ${R[$host.v6route]:-} == 0 ]] && noroute+=("$host")
+    fi
+  done
+
+  local why="не найдены"
+  [[ $hang == 1 ]] && why="DNS не отвечает за $DNS_TIMEOUT с"
+  if [[ ${#bad[@]} -eq 0 ]]; then
+    DNS_STATE=ok
+    step_ok "имена разрешаются: $total из $total"
+  elif [[ $via_proxy == 1 ]]; then
+    DNS_STATE=proxy-only
+    step_warn "имена не разрешаются на этой машине ($why): ${bad[*]} — но через прокси хосты доступны, имя разрешает прокси"
+  else
+    DNS_STATE=fail
+    step_fail "имена не разрешаются ($why): ${bad[*]}"
+  fi
+
+  if [[ ${#noroute[@]} -gt 0 ]]; then
+    V6_NOROUTE=1
+    step_warn "IPv6: у ${noroute[*]} есть адрес IPv6, а маршрута IPv6 нет — агент тратит попытку на IPv6, прежде чем перейти на IPv4"
+  elif [[ $v6 == 1 ]]; then
+    step_ok "IPv6: адреса есть, маршрут есть"
+  else
+    step_skip "IPv6: адресов IPv6 не выдано (у машины нет IPv6 или у хостов нет AAAA) — проверять нечего"
+  fi
+}
+
+# Удачных $1 из $2 → ok | partial | down.
+state_of() { if (($1 == 0)); then printf down; elif (($1 < $2)); then printf partial; else printf ok; fi; }
+
+# shellcheck disable=SC2034  # итог читает вердикт (задача 6)
+check_reach() {
+  if [[ -n $PROXY_URL ]]; then
+    section "Эндпоинты агентов (через прокси $(mask_proxy_url "$PROXY_URL"), и для сравнения напрямую)"
+  else
+    section "Эндпоинты агентов (напрямую, прокси не задан)"
+  fi
+  local line host imp pth other ok_need=1 ok_extra=1 d_ok=0 d_n=0 p_ok=0 p_n=0 txt
+  local only_direct=0 only_proxy=0
+  for line in "${EP_HOSTS[@]}"; do
+    host=${line%%$'\t'*} imp=${line#*$'\t'}
+    pth=$(agent_path "$host")
+    d_n=$((d_n + 1)); [[ ${R[$host.d_rc]:-} == 0 ]] && d_ok=$((d_ok + 1))
+    if [[ -n $PROXY_URL ]]; then
+      p_n=$((p_n + 1)); [[ ${R[$host.p_rc]:-} == 0 ]] && p_ok=$((p_ok + 1))
+    fi
+    if [[ $pth == p ]]; then
+      txt="через прокси — $(path_txt "$host" p); напрямую — $(path_txt "$host" d)"
+    elif [[ -n $PROXY_URL ]]; then
+      txt="напрямую (хост в no_proxy) — $(path_txt "$host" d)"
+    else
+      txt=$(path_txt "$host" d)
+    fi
+    if [[ ${R[$host.${pth}_rc]:-} == 0 ]]; then
+      step_ok "$host: $txt"
+    elif [[ $imp == нужен ]]; then
+      ok_need=0
+      step_fail "$host (нужен): $txt"
+    else
+      ok_extra=0
+      step_warn "$host (доп, основная работа не страдает): $txt"
+    fi
+    other=d; [[ $pth == d ]] && other=p
+    if [[ ${R[$host.${pth}_rc]:-} != 0 && ${R[$host.${other}_rc]:-} == 0 ]]; then
+      if [[ $pth == p ]]; then only_direct=$((only_direct + 1)); else only_proxy=$((only_proxy + 1)); fi
+    fi
+  done
+  if ((only_direct > 0)); then
+    say "    Хостов, доступных напрямую, но не через прокси: $only_direct — агент идёт через прокси, рвётся на нём."
+  fi
+  if ((only_proxy > 0)); then
+    say "    Хостов, доступных через прокси, но не напрямую: $only_proxy — агент идёт к ним напрямую (no_proxy)."
+  fi
+
+  EP_STATE=ok
+  [[ $ok_extra == 0 ]] && EP_STATE=extra
+  [[ $ok_need == 0 ]] && EP_STATE=fail
+  EP_DIRECT=$(state_of "$d_ok" "$d_n")
+  if [[ -n $PROXY_URL ]]; then EP_PROXY=$(state_of "$p_ok" "$p_n"); else EP_PROXY=skipped; fi
+  if [[ -n $PROXY_URL && $EP_DIRECT == down && $EP_PROXY != down ]]; then
+    say "    Напрямую не доступен ни один хост — связь есть только через прокси."
+  fi
+}
+
+# shellcheck disable=SC2034  # итог читает вердикт (задача 6)
+check_tls() {
+  section "TLS"
+  local line host pth rc iss org orgs=() seen="|" flagged=0 any=0
+  for line in "${EP_HOSTS[@]}"; do
+    host=${line%%$'\t'*}
+    pth=$(agent_path "$host")
+    rc=${R[$host.${pth}_rc]:-}
+    iss=${R[$host.${pth}_iss]:-}
+    [[ $rc == 0 || $rc == 60 ]] || continue
+    org=$(issuer_org "$iss")
+    any=1
+    if [[ $rc == 60 ]]; then
+      flagged=1; TLS_STATE=untrusted
+      step_fail "$host: сертификат не проверяется, издатель «${org:-не назван}» — TLS перехватывает антивирус или корпоративный прокси, его корневого сертификата в системе нет"
+    elif [[ -z $org ]]; then
+      continue
+    elif ! is_public_ca "$org"; then
+      flagged=1; [[ $TLS_STATE == untrusted ]] || TLS_STATE=intercept
+      step_warn "$host: издатель «$org» не из публичных — TLS перехватывает антивирус или корпоративный прокси; curl ему доверяет, а агент со своим набором корневых сертификатов может и не доверять"
+    elif [[ $seen != *"|$org|"* ]]; then
+      seen+="$org|"; orgs+=("$org")
+    fi
+  done
+  if [[ $any == 0 ]]; then
+    TLS_STATE=skipped
+    step_skip "ни один хост не ответил по TLS: издателей проверить не на чем"
+  elif [[ $flagged == 0 ]]; then
+    TLS_STATE=ok
+    local joined
+    printf -v joined '%s, ' "${orgs[@]}"
+    step_ok "издатели сертификатов публичные: ${joined%, } — перехвата нет"
+  fi
+}
+
 # ---------- вердикт ----------
 
 verdict() {
@@ -757,6 +1110,7 @@ main() {
   check_agents
   check_proxy_vars
   check_bridge
+  check_endpoints
   verdict
 }
 

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Заглушка getent: DNS машины в тесты не попадает.
+# Ответ — в STUB_DNS_<хост> (не буквы и не цифры → «_»), иначе в STUB_DNS, иначе 4:
+#   4      только IPv4      46  IPv4 и IPv6      6  только IPv6
+#   fail   имя не найдено (код 2)      hang  DNS не отвечает (как после timeout, код 124)
+db=$1 host=${2:-}
+key=${host//[^A-Za-z0-9]/_}
+var="STUB_DNS_$key"
+val=${!var:-${STUB_DNS:-4}}
+case $val in
+  fail) exit 2 ;;
+  hang) exit 124 ;;
+esac
+case $db in
+  ahostsv4) [[ $val == *4* ]] || exit 2; printf '192.0.2.10      STREAM %s\n' "$host" ;;
+  ahostsv6) [[ $val == *6* ]] || exit 2; printf '2001:db8::10    STREAM %s\n' "$host" ;;
+  *) exit 2 ;;
+esac

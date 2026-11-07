@@ -1,0 +1,5 @@
+# Хосты OpenAI в no_proxy, а напрямую сети нет.
+https_proxy=http://127.0.0.1:3128
+no_proxy=localhost,.openai.com
+STUB_CONNECT_3128=0.002*10
+STUB_CURL_DIRECT=28

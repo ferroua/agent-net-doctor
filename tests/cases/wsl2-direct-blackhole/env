@@ -1,0 +1,5 @@
+WSL_DISTRO_NAME=Ubuntu
+# mirrored + VPN в режиме TUN: прямой трафик в чёрную дыру, прокси Windows работает.
+http_proxy=http://127.0.0.1:10809
+STUB_CONNECT_10809=0.002*10
+STUB_CURL_DIRECT=28

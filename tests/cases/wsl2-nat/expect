@@ -3,3 +3,7 @@ WSL2, дистрибутив Ubuntu-24.04 (Ubuntu 24.04.4 LTS)
 режим сети: nat (wslinfo)
 Claude Code 2.1.319
 Codex 0.155.1
+✓ api.anthropic.com: ответил
+✓ chatgpt.com: ответил
+перехвата нет
+Поломок не найдено

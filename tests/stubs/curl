@@ -1,4 +1,33 @@
-#!/bin/sh
-# Сеть в тестах запрещена: сценарий, которому нужен curl, кладёт свою заглушку.
-echo "curl: сеть в тестах запрещена (нужна заглушка в bin/ сценария)" >&2
-exit 7
+#!/usr/bin/env bash
+# Заглушка curl: запросы HTTPS к хостам агентов не уходят в сеть, а получают
+# заданный результат. Путь запроса: -x — через прокси (PROXY), иначе напрямую (DIRECT).
+#
+# Результат — в STUB_CURL_<путь>_<хост> (в имени хоста не буквы и не цифры → «_»),
+# иначе в STUB_CURL_<путь>, иначе ok:
+#   ok            HTTP 404, издатель Google Trust Services
+#   ok:<издатель> HTTP 404 с этим издателем («C=US; O=…; CN=…»)
+#   60:<издатель> сертификат не проверяется; с -k — ответ с этим издателем
+#   <число>       код ошибки curl (6 имя, 7 отказ, 28 тайм-аут, 35 TLS…)
+mode=DIRECT url="" prev="" insecure=0
+for a in "$@"; do
+  [[ $prev == -x ]] && mode=PROXY
+  [[ $a == -k ]] && insecure=1
+  [[ $a == https://* ]] && url=$a
+  prev=$a
+done
+host=${url#https://}; host=${host%%/*}
+key=${host//[^A-Za-z0-9]/_}
+var="STUB_CURL_${mode}_$key"
+val=${!var:-}
+if [[ -z $val ]]; then var="STUB_CURL_$mode"; val=${!var:-ok}; fi
+
+answer() { echo "*  issuer: $1" >&2; printf '404 0.120000'; exit 0; }
+case $val in
+  ok)    answer "C=US; O=Google Trust Services; CN=WE1" ;;
+  ok:*)  answer "${val#ok:}" ;;
+  60:*)  [[ $insecure == 1 ]] && answer "${val#60:}"
+         echo "curl: (60) SSL certificate problem: self-signed certificate in certificate chain" >&2
+         printf '000 0.050000'; exit 60 ;;
+  28)    printf '000 5.001000'; exit 28 ;;
+  *)     printf '000 0.000000'; exit "$val" ;;
+esac

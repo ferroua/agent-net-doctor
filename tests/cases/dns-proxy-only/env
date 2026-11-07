@@ -1,0 +1,5 @@
+# Своего DNS нет, но HTTP-прокси разрешает имена сам.
+https_proxy=http://proxy.corp.example:3128
+STUB_CONNECT_3128=0.003*10
+STUB_DNS=fail
+STUB_CURL_DIRECT=6

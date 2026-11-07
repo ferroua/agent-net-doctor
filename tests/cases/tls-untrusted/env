@@ -1,0 +1,2 @@
+# Перехват TLS, корневого сертификата перехватчика в системе нет.
+STUB_CURL_DIRECT=60:C=US; O=Corp Inspection; CN=Corp SSL Inspection CA
