@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Заглушка curl: запросы HTTPS к хостам агентов не уходят в сеть, а получают
-# заданный результат. Путь запроса: -x — через прокси (PROXY), иначе напрямую (DIRECT).
+# заданный результат. Путь запроса: --noproxy — напрямую (DIRECT), иначе через
+# прокси из https_proxy (PROXY): скрипт передаёт адрес прокси окружением, не -x.
 #
 # Результат — в STUB_CURL_<путь>_<хост> (в имени хоста не буквы и не цифры → «_»),
 # иначе в STUB_CURL_<путь>, иначе ok:
@@ -8,13 +9,14 @@
 #   ok:<издатель> HTTP 404 с этим издателем («C=US; O=…; CN=…»)
 #   60:<издатель> сертификат не проверяется; с -k — ответ с этим издателем
 #   <число>       код ошибки curl (6 имя, 7 отказ, 28 тайм-аут, 35 TLS…)
-mode=DIRECT url="" prev="" insecure=0
+mode=PROXY url="" insecure=0
 for a in "$@"; do
-  [[ $prev == -x ]] && mode=PROXY
+  [[ $a == --noproxy ]] && mode=DIRECT
+  [[ $a == -x || $a == --proxy ]] && { echo "curl: адрес прокси в аргументах (виден в ps)" >&2; exit 99; }
   [[ $a == -k ]] && insecure=1
   [[ $a == https://* ]] && url=$a
-  prev=$a
 done
+[[ $mode == PROXY && -z ${https_proxy:-} ]] && { echo "curl: нет ни --noproxy, ни https_proxy" >&2; exit 99; }
 host=${url#https://}; host=${host%%/*}
 key=${host//[^A-Za-z0-9]/_}
 var="STUB_CURL_${mode}_$key"

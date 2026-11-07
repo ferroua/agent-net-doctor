@@ -819,25 +819,30 @@ in_no_proxy() {
 # rc (код curl), code (HTTP), time (с), iss (издатель сертификата).
 # Подробный вывод curl идёт во временный файл и сразу удаляется:
 # в нём бывает заголовок авторизации прокси.
+# Адрес прокси (с паролем) — через окружение, не через -x: аргументы процесса
+# видны всем пользователям машины в ps, а окружение — только владельцу.
+curl_via() { # direct|proxy  аргументы curl…
+  local mode=$1; shift
+  if [[ $mode == proxy ]]; then
+    ( unset no_proxy NO_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+      export https_proxy=$PROXY_URL
+      curl "$@" )
+  else
+    curl --noproxy '*' "$@"
+  fi
+}
+
 probe_https() { # хост  direct|proxy  префикс
   local host=$1 mode=$2 p=$3 out rc iss err args
   err=$(mktemp "$EP_TMP/err.XXXXXX")
   args=(-sS -o /dev/null -v --connect-timeout "$EP_CONNECT" --max-time "$EP_MAX"
         -w '%{http_code} %{time_total}')
-  if [[ $mode == proxy ]]; then
-    out=$(env -u no_proxy -u NO_PROXY curl "${args[@]}" -x "$PROXY_URL" "https://$host/" 2>"$err")
-  else
-    out=$(curl "${args[@]}" --noproxy '*' "https://$host/" 2>"$err")
-  fi
+  out=$(curl_via "$mode" "${args[@]}" "https://$host/" 2>"$err")
   rc=$?
   iss=$(sed -n 's/^\*[[:space:]]*issuer:[[:space:]]*//p' "$err" | head -n1)
   # Сертификат не проверился — узнать издателя без проверки (-k), только ради имени.
   if [[ $rc -eq 60 && -z $iss ]]; then
-    if [[ $mode == proxy ]]; then
-      env -u no_proxy -u NO_PROXY curl "${args[@]}" -k -x "$PROXY_URL" "https://$host/" >/dev/null 2>"$err"
-    else
-      curl "${args[@]}" -k --noproxy '*' "https://$host/" >/dev/null 2>"$err"
-    fi
+    curl_via "$mode" "${args[@]}" -k "https://$host/" >/dev/null 2>"$err"
     iss=$(sed -n 's/^\*[[:space:]]*issuer:[[:space:]]*//p' "$err" | head -n1)
   fi
   rm -f "$err"
