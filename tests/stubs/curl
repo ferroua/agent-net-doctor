@@ -11,6 +11,10 @@
 #   <число>       код ошибки curl (6 имя, 7 отказ, 28 тайм-аут, 35 TLS…)
 #   a,b,…         по запросам: первый получает a, второй b, дальше — последний
 #                 (повтор запроса скрипта; вызов с -k счёт не двигает)
+#
+# Времена удачного ответа — в STUB_CURL_TIME_<хост>, иначе в STUB_CURL_TIME, иначе
+# «0.120 0.010 0.030 0.080»: всего, DNS, подключение, TLS (накопительно, как -w у curl:
+# time_total time_namelookup time_connect time_appconnect).
 mode=PROXY url="" insecure=0
 for a in "$@"; do
   [[ $a == --noproxy ]] && mode=DIRECT
@@ -33,13 +37,16 @@ if [[ $val == *,* ]]; then
   val=${seq[$n]}
 fi
 
-answer() { echo "*  issuer: $1" >&2; printf '404 0.120000'; exit 0; }
+tvar="STUB_CURL_TIME_$key"
+times=${!tvar:-${STUB_CURL_TIME:-0.120 0.010 0.030 0.080}}
+
+answer() { echo "*  issuer: $1" >&2; printf '404 %s' "$times"; exit 0; }
 case $val in
   ok)    answer "C=US; O=Google Trust Services; CN=WE1" ;;
   ok:*)  answer "${val#ok:}" ;;
   60:*)  [[ $insecure == 1 ]] && answer "${val#60:}"
          echo "curl: (60) SSL certificate problem: self-signed certificate in certificate chain" >&2
-         printf '000 0.050000'; exit 60 ;;
-  28)    printf '000 5.001000'; exit 28 ;;
-  *)     printf '000 0.000000'; exit "$val" ;;
+         printf '000 0.050000 0.010 0.030 0'; exit 60 ;;
+  28)    printf '000 5.001000 0.010 0 0'; exit 28 ;;
+  *)     printf '000 0.000000 0 0 0'; exit "$val" ;;
 esac

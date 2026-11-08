@@ -1,0 +1,4 @@
+#!/bin/sh
+# Как в WSL1: запрос маршрута не поддерживается, но это не «маршрута нет».
+[ "$1" = -6 ] && { echo "RTNETLINK answers: Invalid argument" >&2; exit 2; }
+exit 1

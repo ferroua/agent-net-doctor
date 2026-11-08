@@ -1,0 +1,4 @@
+#!/bin/sh
+# Маршрута IPv6 нет: ядро так и отвечает.
+[ "$1" = -6 ] && { echo "RTNETLINK answers: Network is unreachable" >&2; exit 2; }
+exit 1

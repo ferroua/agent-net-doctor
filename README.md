@@ -8,7 +8,7 @@
 В терминале WSL2 или Ubuntu, там же, где запускаете агента:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ferroua/agent-net-doctor/v0.1.0/net-doctor.sh -o net-doctor.sh && bash net-doctor.sh
+curl -fsSL https://raw.githubusercontent.com/ferroua/agent-net-doctor/v0.1.1/net-doctor.sh -o net-doctor.sh && bash net-doctor.sh
 ```
 
 **Что вы увидите.** Прогон заканчивается сам: обычно за несколько секунд, на плохой
@@ -22,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/ferroua/agent-net-doctor/v0.1.0/net
 Или через git:
 
 ```bash
-git clone --branch v0.1.0 https://github.com/ferroua/agent-net-doctor.git
+git clone --branch v0.1.1 https://github.com/ferroua/agent-net-doctor.git
 bash agent-net-doctor/net-doctor.sh
 ```
 
@@ -57,7 +57,8 @@ bash agent-net-doctor/net-doctor.sh
 Здоровая сеть. Настоящий прогон: WSL2, режим `nat`, оба агента установлены.
 
 ```text
-agent-net-doctor 0.1.0
+agent-net-doctor 0.1.1
+Проверка займёт несколько секунд, на плохой сети — до полутора минут. Ответ — в разделе «Итог» внизу.
 
 Среда
   ✓ WSL2, дистрибутив Ubuntu-24.04 (Ubuntu 24.04.4 LTS)
@@ -73,20 +74,22 @@ agent-net-doctor 0.1.0
 Прокси-переменные
   – прокси не задан
 
+… меряю хосты агентов: 9
+
 DNS и IPv6
   ✓ имена разрешаются: 9 из 9
   – IPv6: адресов IPv6 не выдано (у машины нет IPv6 или у хостов нет AAAA) — проверять нечего
 
 Эндпоинты агентов (напрямую, прокси не задан)
-  ✓ api.anthropic.com: ответил (HTTP 404) за 0,209 с
-  ✓ platform.claude.com: ответил (HTTP 200) за 0,900 с
-  ✓ downloads.claude.ai: ответил (HTTP 403) за 0,355 с
-  ✓ mcp-proxy.anthropic.com: ответил (HTTP 404) за 0,320 с
-  ✓ http-intake.logs.us5.datadoghq.com: ответил (HTTP 403) за 0,462 с
-  ✓ api.openai.com: ответил (HTTP 421) за 0,253 с
-  ✓ chatgpt.com: ответил (HTTP 200) за 0,760 с
-  ✓ auth.openai.com: ответил (HTTP 403) за 0,290 с
-  ✓ ab.chatgpt.com: ответил (HTTP 403) за 0,319 с
+  ✓ api.anthropic.com: ответил (HTTP 404) за 0,217 с
+  ✓ platform.claude.com: ответил (HTTP 200) за 0,712 с
+  ✓ downloads.claude.ai: ответил (HTTP 403) за 0,429 с
+  ✓ mcp-proxy.anthropic.com: ответил (HTTP 404) за 0,437 с
+  ✓ http-intake.logs.us5.datadoghq.com: ответил (HTTP 403) за 0,541 с
+  ✓ api.openai.com: ответил (HTTP 421) за 0,390 с
+  ✓ chatgpt.com: ответил (HTTP 200) за 0,767 с
+  ✓ auth.openai.com: ответил (HTTP 403) за 0,311 с
+  ✓ ab.chatgpt.com: ответил (HTTP 403) за 0,341 с
 
 TLS
   ✓ издатели сертификатов публичные: Google Trust Services, Let's Encrypt, DigiCert Inc — перехвата нет
@@ -98,6 +101,12 @@ TLS
 
 Любой код HTTP (404, 403, 421) значит, что хост ответил: скрипт проверяет связь,
 а не вход в аккаунт.
+
+Ответ дольше 3 с помечается «!» с этапом, на который ушло время: DNS, подключение,
+TLS или ответ сервера. Хост, ответивший только со второй попытки, — тоже «!».
+Ничего не рвётся, но ответы медленные — итог так и говорит («нигде не рвётся, но
+медленно отвечают…») и советует по этапу; код выхода при этом 0. Все предупреждения
+коротко собраны в «Итоге».
 
 Поломка из раздела [«Как это выглядело на практике»](#как-это-выглядело-на-практике).
 Это не прогон на живой машине, а сценарий `wsl2-mirrored-vpn-bridge` из `tests/`:
@@ -211,7 +220,7 @@ autoProxy=false
 
 ## Поддержка
 
-| Среда | v0.1.0 |
+| Среда | v0.1.1 |
 |---|---|
 | WSL2 + Ubuntu | полностью |
 | Ubuntu без WSL | общие проверки (прокси, DNS/IPv6, TLS, эндпоинты) |

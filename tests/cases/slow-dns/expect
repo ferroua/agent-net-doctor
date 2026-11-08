@@ -1,0 +1,5 @@
+! api.anthropic.com: медленно — ответил (HTTP 404) за 4,412 с; дольше всего — DNS, 4,100 с
+✓ api.openai.com: ответил (HTTP 404) за 0,120 с
+Медленно (не быстрее 3 с): 4 из 9, чаще всего время уходит на этап «DNS».
+Что поменять: DNS отвечает медленно
+! медленно отвечают: api.anthropic.com, platform.claude.com, http-intake.logs.us5.datadoghq.com, chatgpt.com

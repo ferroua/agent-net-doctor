@@ -13,12 +13,13 @@
 
 set -u
 
-ND_VERSION="0.1.0"
+ND_VERSION="0.1.1"
 ND_ROOT="${ND_ROOT:-}"
 
 SHOW_IP=0
 FAILS=0
 WARNS=0
+WARN_LIST=()          # предупреждения коротко — для итога
 
 # Что узнали о среде и замерах — для следующих проверок и вердикта.
 {
@@ -43,6 +44,9 @@ WARNS=0
   EP_PROXY=""          # ok | down | partial | skipped — через прокси
   TLS_STATE=""         # ok | intercept | untrusted | skipped
   TLS_ORG=""           # издатель сертификата при перехвате
+  SLOW_N=0             # хостов, ответивших по пути агента не быстрее SLOW_S
+  SLOW_PHASE=""        # DNS | подключение | TLS | ответ сервера — где у них ушло больше всего
+  FLAKY_N=0            # хостов, ответивших только со второй попытки
 }
 
 # Для тестов: ND_PYTHON — имя или путь python3 (по умолчанию python3).
@@ -57,7 +61,15 @@ err()  { printf 'net-doctor: %s\n' "$*" >&2; }
 step_ok()   { printf '  ✓ %s\n' "$*"; }
 step_fail() { printf '  ✗ %s\n' "$*"; FAILS=$((FAILS + 1)); }
 step_skip() { printf '  – %s\n' "$*"; }
-step_warn() { printf '  ! %s\n' "$*"; WARNS=$((WARNS + 1)); }
+# Предупреждение: второй аргумент — коротко для итога (по умолчанию — текст до « — »;
+# пустой — не попадает в итог, его сводит вызывающий).
+step_warn() {
+  printf '  ! %s\n' "$1"
+  WARNS=$((WARNS + 1))
+  local short=${2-${1%% — *}}
+  [[ -n $short ]] && WARN_LIST+=("$short")
+  return 0
+}
 section()   { printf '\n%s\n' "$*"; }
 
 # ---------- скрытие адресов ----------
@@ -233,12 +245,12 @@ check_os() {
         exit 2
       fi ;;
     Darwin)
-      say "macOS пока не поддерживается: v0.1.0 проверяет WSL2 и Ubuntu."
+      say "macOS пока не поддерживается: эта версия проверяет WSL2 и Ubuntu."
       say "Поддержка macOS планируется в v0.2. Если готовы проверить на своём Mac —"
       say "откройте issue: https://github.com/ferroua/agent-net-doctor/issues"
       exit 2 ;;
     *)
-      say "Среда «$os» не поддерживается: v0.1.0 проверяет WSL2 и Ubuntu."
+      say "Среда «$os» не поддерживается: эта версия проверяет WSL2 и Ubuntu."
       exit 2 ;;
   esac
 }
@@ -324,7 +336,7 @@ check_env() {
     # WSL1 — без своего ядра, версия ядра вида 4.4.0-19041-Microsoft.
     if [[ $osr == *-Microsoft ]]; then
       ENV_KIND=wsl1
-      step_warn "WSL1${distro:+, дистрибутив $distro} ($pretty): v0.1.0 проверяет WSL2, проверки только общие"
+      step_warn "WSL1${distro:+, дистрибутив $distro} ($pretty): проверки только общие, полностью поддерживается WSL2"
       return 0
     fi
     ENV_KIND=wsl2
@@ -336,7 +348,7 @@ check_env() {
   if [[ $id == ubuntu || " $like " == *" ubuntu "* ]]; then
     step_ok "$pretty без WSL: общие проверки"
   else
-    step_ok "$pretty без WSL: общие проверки (v0.1.0 проверялась на Ubuntu)"
+    step_ok "$pretty без WSL: общие проверки (скрипт проверялся на Ubuntu)"
   fi
   return 0
 }
@@ -779,6 +791,7 @@ PUBLIC_CAS=("Google Trust Services" "Let's Encrypt" "DigiCert" "Sectigo" "Amazon
 EP_CONNECT=5          # секунд на подключение
 EP_MAX=10             # секунд на весь запрос
 DNS_TIMEOUT=4         # секунд на разрешение имени
+SLOW_S=3              # ответ не быстрее — «медленно»
 
 EP_TMP=""
 cleanup() {
@@ -833,10 +846,10 @@ curl_via() { # direct|proxy  аргументы curl…
 }
 
 probe_https() { # хост  direct|proxy  префикс
-  local host=$1 mode=$2 p=$3 out rc iss err args
+  local host=$1 mode=$2 p=$3 out rc iss err args code total dns conn tls
   err=$(mktemp "$EP_TMP/err.XXXXXX")
   args=(-sS -o /dev/null -v --connect-timeout "$EP_CONNECT" --max-time "$EP_MAX"
-        -w '%{http_code} %{time_total}')
+        -w '%{http_code} %{time_total} %{time_namelookup} %{time_connect} %{time_appconnect}')
   out=$(curl_via "$mode" "${args[@]}" "https://$host/" 2>"$err")
   rc=$?
   iss=$(sed -n 's/^\*[[:space:]]*issuer:[[:space:]]*//p' "$err" | head -n1)
@@ -846,8 +859,10 @@ probe_https() { # хост  direct|proxy  префикс
     iss=$(sed -n 's/^\*[[:space:]]*issuer:[[:space:]]*//p' "$err" | head -n1)
   fi
   rm -f "$err"
-  printf '%s_rc\t%s\n%s_code\t%s\n%s_time\t%s\n%s_iss\t%s\n' \
-    "$p" "$rc" "$p" "${out%% *}" "$p" "${out##* }" "$p" "${iss//$'\r'/}"
+  read -r code total dns conn tls <<<"$out"
+  printf '%s_rc\t%s\n%s_code\t%s\n%s_time\t%s\n%s_dns\t%s\n%s_conn\t%s\n%s_tls\t%s\n%s_iss\t%s\n' \
+    "$p" "$rc" "$p" "${code:-}" "$p" "${total:-0}" "$p" "${dns:-0}" "$p" "${conn:-0}" "$p" "${tls:-0}" \
+    "$p" "${iss//$'\r'/}"
   return "$rc"
 }
 
@@ -867,14 +882,17 @@ probe_path() { # хост  direct|proxy  префикс  путь-агента(d
 
 # Всё о хосте: DNS, IPv6, прямой доступ, через прокси. Пишет в файл $2.
 probe_host() { # хост  файл
-  local host=$1 f=$2 a4="" a6="" rc4=0 rc6=0 v6route="" pth
+  local host=$1 f=$2 a4="" a6="" rc4=0 rc6=0 v6route="" pth e
   {
     a4=$(timeout "$DNS_TIMEOUT" getent ahostsv4 "$host" 2>/dev/null) || rc4=$?
     a6=$(timeout "$DNS_TIMEOUT" getent ahostsv6 "$host" 2>/dev/null) || rc6=$?
     a4=$(awk 'NR==1{print $1}' <<<"$a4")
     a6=$(awk '$1 !~ /^::ffff:/ {print $1; exit}' <<<"$a6")
     if [[ -n $a6 ]] && command -v ip >/dev/null 2>&1; then
-      if ip -6 route get "$a6" >/dev/null 2>&1; then v6route=1; else v6route=0; fi
+      # «Маршрута нет» — только по ответу ядра; другая ошибка (WSL1, урезанный ip) — не знаем.
+      if e=$(ip -6 route get "$a6" 2>&1 >/dev/null); then v6route=1
+      elif [[ ${e,,} == *unreachable* ]]; then v6route=0
+      else v6route='?'; fi
     fi
     printf 'a4\t%s\nrc4\t%s\na6\t%s\nrc6\t%s\nv6route\t%s\n' "$a4" "$rc4" "$a6" "$rc6" "$v6route"
     pth=$(agent_path "$host")
@@ -945,6 +963,8 @@ check_endpoints() {
   EP_TMP=$(mktemp -d) || return 0
   trap cleanup EXIT
   # Хосты меряются параллельно: недоступный хост ждёт до EP_MAX секунд.
+  say ""
+  say "… меряю хосты агентов: ${#EP_HOSTS[@]}"
   local i=0 pids=()
   for line in "${EP_HOSTS[@]}"; do
     host=${line%%$'\t'*}
@@ -976,7 +996,7 @@ agent_path() {
 
 check_dns() {
   section "DNS и IPv6"
-  local line host total=0 bad=() hang=0 via_proxy=1 noroute=() v6=0 pth
+  local line host total=0 bad=() hang=0 via_proxy=1 noroute=() v6unk=0 v6=0 pth who
   for line in "${EP_HOSTS[@]}"; do
     host=${line%%$'\t'*}
     total=$((total + 1))
@@ -989,6 +1009,7 @@ check_dns() {
     if [[ -n ${R[$host.a6]:-} ]]; then
       v6=1
       [[ ${R[$host.v6route]:-} == 0 ]] && noroute+=("$host")
+      [[ ${R[$host.v6route]:-} == '?' ]] && v6unk=1
     fi
   done
 
@@ -1006,7 +1027,11 @@ check_dns() {
   fi
 
   if [[ ${#noroute[@]} -gt 0 ]]; then
-    step_warn "IPv6: у ${noroute[*]} есть адрес IPv6, а маршрута IPv6 нет — агент тратит попытку на IPv6, прежде чем перейти на IPv4"
+    who=$(join_hosts "${noroute[@]}")
+    [[ ${#noroute[@]} -eq $total ]] && who="всех $total хостов"
+    step_warn "IPv6: у $who есть адрес IPv6, а маршрута IPv6 нет — подключение по IPv6 сразу отказывает, и агент переходит на IPv4; если ответы медленные, причина может быть здесь"
+  elif [[ $v6unk == 1 ]]; then
+    step_skip "IPv6: адреса есть, а маршрут проверить не удалось — ip не отвечает на запрос маршрута (так бывает в WSL1)"
   elif [[ $v6 == 1 ]]; then
     step_ok "IPv6: адреса есть, маршрут есть"
   else
@@ -1017,6 +1042,20 @@ check_dns() {
 # Удачных $1 из $2 → ok | partial | down.
 state_of() { if (($1 == 0)); then printf down; elif (($1 < $2)); then printf partial; else printf ok; fi; }
 
+# Где ушло больше всего времени запроса хоста $1 по пути $2 → PH_NAME, PH_US (мкс).
+# Времена curl накопительные: DNS → подключение → TLS → ответ сервера.
+PH_NAME="" PH_US=0
+slow_phase() {
+  local h=$1 p=$2 t d c s
+  t=$(to_us "${R[$h.${p}_time]:-0}") d=$(to_us "${R[$h.${p}_dns]:-0}")
+  c=$(to_us "${R[$h.${p}_conn]:-0}") s=$(to_us "${R[$h.${p}_tls]:-0}")
+  PH_NAME=DNS PH_US=$d
+  if ((c - d > PH_US)); then PH_NAME=подключение PH_US=$((c - d)); fi
+  if ((s - c > PH_US)); then PH_NAME=TLS PH_US=$((s - c)); fi
+  if ((t - s > PH_US)); then PH_NAME="ответ сервера" PH_US=$((t - s)); fi
+  return 0
+}
+
 check_reach() {
   if [[ -n $PROXY_URL ]]; then
     section "Эндпоинты агентов (через прокси $(mask_proxy_url "$PROXY_URL"), и для сравнения напрямую)"
@@ -1024,7 +1063,8 @@ check_reach() {
     section "Эндпоинты агентов (напрямую, прокси не задан)"
   fi
   local line host imp pth other ok_need=1 ok_extra=1 d_ok=0 d_n=0 p_ok=0 p_n=0 txt
-  local only_direct=0 only_proxy=0
+  local only_direct=0 only_proxy=0 slow=() flaky=() t_us
+  local -A phases=()
   for line in "${EP_HOSTS[@]}"; do
     host=${line%%$'\t'*} imp=${line#*$'\t'}
     pth=$(agent_path "$host")
@@ -1040,13 +1080,26 @@ check_reach() {
       txt=$(path_txt "$host" d)
     fi
     if [[ ${R[$host.${pth}_rc]:-} == 0 ]]; then
-      step_ok "$host: $txt"
+      t_us=$(to_us "${R[$host.${pth}_time]:-0}")
+      if ((t_us >= SLOW_S * 1000000)); then
+        slow_phase "$host" "$pth"
+        slow+=("$host")
+        phases[$PH_NAME]=$((${phases[$PH_NAME]:-0} + 1))
+        [[ -z $SLOW_PHASE ]] && SLOW_PHASE=$PH_NAME
+        ((${phases[$PH_NAME]} > ${phases[$SLOW_PHASE]})) && SLOW_PHASE=$PH_NAME
+        step_warn "$host: медленно — $txt; дольше всего — $PH_NAME, $(fmt_s "$PH_US") с" ""
+      elif [[ -n ${R[$host.${pth}_first]:-} ]]; then
+        flaky+=("$host")
+        step_warn "$host: нестабильно — $txt" ""
+      else
+        step_ok "$host: $txt"
+      fi
     elif [[ $imp == нужен ]]; then
       ok_need=0
       step_fail "$host (нужен): $txt"
     else
       ok_extra=0
-      step_warn "$host (доп, основная работа не страдает): $txt"
+      step_warn "$host (доп, основная работа не страдает): $txt" "$host (доп): $(path_txt "$host" "$pth")"
     fi
     other=d; [[ $pth == d ]] && other=p
     if [[ ${R[$host.${pth}_rc]:-} != 0 && ${R[$host.${other}_rc]:-} == 0 ]]; then
@@ -1059,6 +1112,12 @@ check_reach() {
   if ((only_proxy > 0)); then
     say "    Хостов, доступных через прокси, но не напрямую: $only_proxy — агент идёт к ним напрямую (no_proxy)."
   fi
+  SLOW_N=${#slow[@]} FLAKY_N=${#flaky[@]}
+  if ((SLOW_N > 0)); then
+    say "    Медленно (не быстрее $SLOW_S с): $SLOW_N из ${#EP_HOSTS[@]}, чаще всего время уходит на этап «$SLOW_PHASE»."
+    WARN_LIST+=("медленно отвечают: $(join_hosts "${slow[@]}")")
+  fi
+  ((FLAKY_N > 0)) && WARN_LIST+=("ответили только со второй попытки: $(join_hosts "${flaky[@]}")")
 
   EP_STATE=ok
   [[ $ok_extra == 0 ]] && EP_STATE=extra
@@ -1248,6 +1307,19 @@ decide() {
     return 1
   fi
 
+  # Ничего не рвётся, но ответы медленные — не поломка (код 0), но сказать об этом.
+  if ((SLOW_N > 0)); then
+    local fix
+    case $SLOW_PHASE in
+      DNS) fix="DNS отвечает медленно: проверьте DNS-сервер в /etc/resolv.conf (в WSL — настройку dnsTunneling в .wslconfig) и повторите прогон" ;;
+      подключение) fix="подключение медленное — потери на пути (VPN, Wi-Fi): повторите прогон с VPN и без него для сравнения" ;;
+      TLS) fix="TLS устанавливается медленно — трафик проверяет антивирус или VPN: повторите прогон с ними и без для сравнения" ;;
+      *) fix="на этой машине ничего: медленно отвечает сам сервис; если повторяется — смотрите страницу статуса сервиса" ;;
+    esac
+    set_verdict "нигде не рвётся, но медленно отвечают $SLOW_N из ${#EP_HOSTS[@]} хостов (дольше всего — $SLOW_PHASE)" "$fix"
+    return 0
+  fi
+
   set_verdict "нигде, сеть здорова" \
     "ничего; если агент всё равно виснет — причина не в сети этой машины"
   return 0
@@ -1259,7 +1331,11 @@ verdict() {
   decide || rc=1
   say "  Где рвётся: $V_WHERE"
   say "  Что поменять: $V_FIX"
-  [[ $WARNS -gt 0 ]] && say "  Предупреждений: $WARNS (отмечены «!» выше)"
+  if [[ $WARNS -gt 0 ]]; then
+    say "  Предупреждений: $WARNS (подробно — у «!» выше):"
+    local w
+    for w in "${WARN_LIST[@]}"; do say "    ! $w"; done
+  fi
   return "$rc"
 }
 
@@ -1267,6 +1343,7 @@ main() {
   parse_args "$@"
   check_os
   say "agent-net-doctor $ND_VERSION"
+  say "Проверка займёт несколько секунд, на плохой сети — до полутора минут. Ответ — в разделе «Итог» внизу."
   [[ $SHOW_IP == 1 ]] && say "Внимание: --show-ip, адреса в выводе не скрыты."
   check_env
   [[ $ENV_KIND == wsl2 ]] && check_wsl

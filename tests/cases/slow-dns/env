@@ -1,0 +1,5 @@
+# 4 хоста из 9 отвечают за ~4,4 с, почти всё время — DNS (как в прогоне на другой машине).
+STUB_CURL_TIME_api_anthropic_com=4.412 4.100 4.150 4.300
+STUB_CURL_TIME_platform_claude_com=4.917 4.500 4.560 4.700
+STUB_CURL_TIME_http_intake_logs_us5_datadoghq_com=4.530 4.200 4.260 4.400
+STUB_CURL_TIME_chatgpt_com=4.988 4.600 4.650 4.800
