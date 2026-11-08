@@ -8,10 +8,16 @@
 В терминале WSL2 или Ubuntu, там же, где запускаете агента:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/ferroua/agent-net-doctor/v0.1.0/net-doctor.sh
-less net-doctor.sh      # по желанию: прочитать, что скрипт делает
-bash net-doctor.sh
+curl -fsSL https://raw.githubusercontent.com/ferroua/agent-net-doctor/v0.1.0/net-doctor.sh -o net-doctor.sh && bash net-doctor.sh
 ```
+
+**Что вы увидите.** Прогон заканчивается сам: обычно за несколько секунд, на плохой
+сети — до полутора минут. Сверху идут подробности по участкам, а ответ — **две строки
+в разделе «Итог» внизу**: «Где рвётся» и «Что поменять». Код выхода: 0 — сеть здорова,
+1 — найдена поломка, 2 — среда не поддерживается.
+
+Хотите прочитать код до запуска — откройте `net-doctor.sh` в редакторе.
+Если открыли в просмотрщике `less`, выход из него — клавиша `q`.
 
 Или через git:
 
